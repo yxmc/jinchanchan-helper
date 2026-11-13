@@ -14,6 +14,8 @@ public final class PhoneLayout {
     public static final int NAME_W = 274, NAME_H = 55;
     public static final int COST_W = 35, COST_H = 57;
     public static final int REFRESH_W = 107, REFRESH_H = 57;
+    /** 刷新按钮字模的吻合门限；商店是否打开与偏移定位都以此为准，避免两处门限不一致。 */
+    public static final double SHOP_OPEN_THRESHOLD = .88;
 
     /**
      * 一套版式：位置数值均为该机型原生截图像素。
@@ -131,12 +133,20 @@ public final class PhoneLayout {
     public static int[] shift(int[] rect, int offsetX) { return new int[]{rect[0]+offsetX, rect[1], rect[2], rect[3]}; }
 
     public static int locateOffset(int[] pixels, int width, byte[] refreshMask) { return locateOffset(pixels, width, refreshMask, current()); }
-    /** 指定版式定位刷新文字的水平偏移，供识别器按本帧实际分辨率调用。 */
+    /**
+     * 指定版式定位刷新文字的水平偏移，供识别器按本帧实际分辨率调用。
+     *
+     * <p>偏移只用于修正横屏方向带来的整体平移。门限必须足够严：实测 K80 上正确位置
+     * 相似度为 1.000，若门限过松（曾被设为 .78），程序会在错误位置凑出一个勉强达标的
+     * 分数并把偏移定成 -48——之后金币、卡名、费用等所有裁剪框都被整体挪开，
+     * 金币读不出来（表现为“金币区域读取失败”），并可能点错卡。
+     */
     public static int locateOffset(int[] pixels, int width, byte[] refreshMask, Spec spec) {
         // 搜索范围随屏幕宽度同比放大；两机刷新按钮都留有余量，可覆盖左右两种横屏方向。
         int range = Math.round(width * 96f / XIAOMI14.width);
         int[] base = spec.refresh;
-        if (anchorScore(pixels, width, refreshMask, base, 0) >= .88) return 0;
+        // 原位已经高度吻合时直接采用，不再搜索，避免在别处凑出次优解。
+        if (anchorScore(pixels, width, refreshMask, base, 0) >= .90) return 0;
         double best = 0; int offset = 0;
         for (int dx = -range; dx <= range; dx += 2) {
             double score = anchorScore(pixels, width, refreshMask, base, dx);
@@ -147,8 +157,9 @@ public final class PhoneLayout {
             double score = anchorScore(pixels, width, refreshMask, base, dx);
             if (score > best) { best = score; offset = dx; }
         }
-        // 这里只决定裁剪原点；商店是否打开与是否购买仍由模板与 OCR 复核。
-        return best >= .78 ? offset : 0;
+        // 与商店判定使用同一套门限：搜到的位置必须真正吻合才采信，否则退回零偏移，
+        // 宁可让本帧按标定坐标识别，也不要把整套裁剪框挪到错的地方。
+        return best >= SHOP_OPEN_THRESHOLD ? offset : 0;
     }
     private static double anchorScore(int[] pixels, int width, byte[] reference, int[] rect, int dx) {
         byte[] sample = ScreenGuard.crop(pixels, width, shift(rect, dx));

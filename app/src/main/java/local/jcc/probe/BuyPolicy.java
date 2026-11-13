@@ -78,6 +78,8 @@ public final class BuyPolicy {
                 bought += completed;
                 pending = null; misses = 0;
             } else if (!Arrays.equals(frame.names, previousNames)) {
+                // 卡面变了但目标格没变空：这一次点击没生效（实测同一手势里多张卡的
+                // 后续点击会被游戏忽略）。不计数，但要让下一次决策重新规划再点一次。
                 pending = null; misses = 0;
             } else if (frame.readable && ++misses >= (frame.gold == previousGold ? 2 : 3)) {
                 // Income and imperfect gold OCR must not keep a completed gesture pending forever.
@@ -104,9 +106,14 @@ public final class BuyPolicy {
         if (stableReads < 2) return decision(Kind.WAIT, -1, "等待商店卡面稳定再刷新");
         return decision(Kind.REFRESH, -1, "没有目标，刷新商店");
     }
+    /**
+     * 记录本次实际发出的动作。一次手势只点一张卡（同帧多张的后续点击会被游戏忽略），
+     * 因此 BUY 只按第一个格子的点击结果确认，其余格子留给下一帧重新规划再买。
+     */
     public void sent(Decision action, Frame frame) {
         if (action.kind != Kind.BUY && action.kind != Kind.REFRESH) throw new IllegalArgumentException();
-        pending = action; previousGold = frame.gold;
+        pending = action.kind == Kind.BUY ? new Decision(new int[]{action.slots[0]}, action.message) : action;
+        previousGold = frame.gold;
         previousNames = frame.names.clone();
         misses = 0; refreshTransition = false;
         stableReads = 0; stableNames = null; stableCosts = null;

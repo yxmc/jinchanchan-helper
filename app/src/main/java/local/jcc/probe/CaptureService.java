@@ -59,7 +59,7 @@ public class CaptureService extends AccessibilityService {
     @Override protected void onServiceConnected() {
         instance = this;
         if (trace == null) trace = new AssistTrace(this);
-        record("service connected version=" + "0.11.8");
+        record("service connected version=" + "0.11.9");
         handler.removeCallbacks(health); handler.postDelayed(health, 1000);
         status("服务已连接。可显示悬浮窗进行商店识别。");
     }
@@ -412,6 +412,8 @@ public class CaptureService extends AccessibilityService {
         String error = null;
         try {
             if (recognizer == null) recognizer = new ShopOcr(this, ChampionCatalog.of(this, championSet()));
+            // 每次识别都同步目标名单：卡名 OCR 的一位错别字只向名单内收敛，不会认成别的卡。
+            recognizer.setTargets(targets);
             result = recognizer.analyze(image);
             reused = recognizer.cachedLastFrame();
         } catch (Throwable e) { error = e.toString(); }
@@ -474,20 +476,23 @@ public class CaptureService extends AccessibilityService {
             overlay.dockBelowShop(); handler.post(scanNext); return;
         }
         java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
-        int count = action.kind == BuyPolicy.Kind.BUY ? action.slots.length : 1;
-        TapTiming timing = new TapTiming(count, random);
+        // 一次手势只点一张卡。曾把同一帧里多个目标合成一次手势（间隔 3~5ms 连续点击），
+        // 实测只有第一张生效，后面的点击被游戏忽略——表现为“一帧里两张该买的卡只买了一张”。
+        // 每张卡单独一次手势，由下一帧重新识别后再买下一张，虽然多花几十毫秒但可靠得多。
+        int slot = action.kind == BuyPolicy.Kind.BUY ? action.slots[0] : -1;
+        TapTiming timing = new TapTiming(1, random);
         android.accessibilityservice.GestureDescription.Builder builder = new android.accessibilityservice.GestureDescription.Builder();
-        for (int i = 0; i < count; i++) {
+        {
             // 点击点严格取自本帧所用版式，避免与识别时的裁剪坐标系不一致。
             float x = (action.kind == BuyPolicy.Kind.BUY
-                ? spec.nameX[action.slots[i]] + spec.tapCardDx
+                ? spec.nameX[slot] + spec.tapCardDx
                 : spec.tapRefreshX) + frame.offsetX + random.nextInt(-9, 10);
             float y = (action.kind == BuyPolicy.Kind.BUY ? spec.tapCardY : spec.tapRefreshY) + random.nextInt(-12, 13);
             if (overlay != null && overlay.blocksPoint(x, y)) {
                 overlay.dockBelowShop(); retryFrame("正在移开悬浮窗"); return;
             }
             android.graphics.Path path = new android.graphics.Path(); path.moveTo(x, y);
-            builder.addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path, timing.starts[i], timing.durations[i]));
+            builder.addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path, timing.starts[0], timing.durations[0]));
         }
         android.accessibilityservice.GestureDescription gesture = builder.build();
         final long dispatchStarted = SystemClock.elapsedRealtime();
@@ -498,7 +503,8 @@ public class CaptureService extends AccessibilityService {
         policy.sent(action, frame);
         phase("gesture");
         record("dispatch id=" + gestureId + " generation=" + actionToken + " action=" + action.kind +
-            " slots=" + java.util.Arrays.toString(action.slots) + " offset=" + frame.offsetX + " " + frame.summary());
+            " slot=" + slot + " pending_plan=" + java.util.Arrays.toString(action.slots) +
+            " offset=" + frame.offsetX + " " + frame.summary());
         final boolean[] finished = {false};
         final Runnable gestureTimeout = () -> {
             if (finished[0]) return;
@@ -520,7 +526,7 @@ public class CaptureService extends AccessibilityService {
                     if (!scanning) return;
                     if (actionToken != generation) { handler.post(scanNext); return; }
                     android.util.Log.i("JccAssist", "Gesture completed: " + action.message + " · scheduled=" + timing.totalMs + "ms");
-                    android.util.Log.i("JccPerf", "action=" + action.kind + " count=" + count + " scheduled_ms=" + timing.totalMs + " actual_ms=" + (completed - dispatchStarted));
+                    android.util.Log.i("JccPerf", "action=" + action.kind + " count=1 scheduled_ms=" + timing.totalMs + " actual_ms=" + (completed - dispatchStarted));
                     if (action.kind == BuyPolicy.Kind.REFRESH) {
                         if (lastRefreshCompleted != 0) android.util.Log.i("JccPerf", "refresh_gap_ms=" + (completed - lastRefreshCompleted));
                         lastRefreshCompleted = completed;

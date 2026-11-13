@@ -41,6 +41,13 @@ final class ShopOcr implements AutoCloseable {
     private final ChampionCatalog catalog;
     void requestRecovery() { recoveryRequested = true; }
 
+    /**
+     * 目标名单。仅用于把 OCR 结果里的一位错别字校正成名单内的卡名，
+     * 不参与「要不要买」的判断——买不买仍由 BuyPolicy 按名单精确比对决定。
+     */
+    private java.util.List<String> targets = java.util.Collections.emptyList();
+    void setTargets(java.util.List<String> value) { targets = value == null ? java.util.Collections.emptyList() : value; }
+
     boolean cachedLastFrame() { return cached; }
 
     ShopOcr(Context context, ChampionCatalog catalog) {
@@ -289,7 +296,7 @@ final class ShopOcr implements AutoCloseable {
         }
         PhoneVision.Template refreshSample = new PhoneVision.Template(signature[11], PhoneLayout.REFRESH_W, PhoneLayout.REFRESH_H);
         // 没有本机型专用字模时不能套用别机型的刷新模板，只信 OCR。
-        f.shopOpen = (!noTemplates && PhoneVision.score(refreshSample, refreshTemplate) >= .88) ||
+        f.shopOpen = (!noTemplates && PhoneVision.score(refreshSample, refreshTemplate) >= PhoneLayout.SHOP_OPEN_THRESHOLD) ||
             (observedRefresh != null && PhoneVision.score(refreshSample, observedRefresh) >= .90);
         if (!f.shopOpen) {
             f.shopOpen = read(image, refresh(), false).text.contains("刷新");
@@ -328,7 +335,10 @@ final class ShopOcr implements AutoCloseable {
             }
             Reading name = readings[i];
             if (recover && known == null && name.text.isEmpty()) name = read(image, name(i), false);
-            f.names[i] = known != null ? known : name.text.isEmpty() ? null : name.text;
+            // 模板命中时用模板卡名；否则把 OCR 结果按棋池校正一位错别字（「破比」→「波比」），
+            // 否则目标匹配的精确比对会漏买。
+            String text = name.text.isEmpty() ? null : catalog.normalize(name.text, targets);
+            f.names[i] = known != null ? known : text;
             if (known == null && name.text.isEmpty()) {
                 f.readable = false;
                 f.problem += (f.problem.isEmpty() ? "" : "；") + "第 " + (i + 1) + " 格暂未读到卡名";

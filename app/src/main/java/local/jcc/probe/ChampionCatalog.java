@@ -66,6 +66,43 @@ final class ChampionCatalog {
     Integer cost(String name) { return costs.get(name); }
     /** 该名字是否属于当前赛季目录。 */
     boolean has(String name) { return names.contains(name); }
+    /**
+     * 把 OCR 读到的卡名校正为**目标名单**里的卡名；校正不出来时返回原样。
+     *
+     * <p>OCR 对中文卡名有稳定的写错倾向（实测「科加斯」常被读成「料加斯」、
+     * 「波比」读成「破比」、「德莱文」读成「德菜文」），而目标匹配是精确字符串比对，
+     * 错一个字就会漏买，表现为「明明在商店里却只买了其中几张」。
+     *
+     * <p>只向 {@code targets}（用户设定的几人名单）收敛，而不是向整个棋池收敛：
+     * 棋池里存在大量互为一次错字的卡名（双字如 赛恩/薇恩/永恩/奥恩、艾克/艾希、
+     * 凯南/凯隐；三字如 约里克/沃里克/塔里克、雷克塞/雷克顿、金克丝/拉克丝），
+     * 向全池归一化会把一张卡认成另一张，那就买错卡了。目标通常只有十来个名字，
+     * 组内几乎不会互为错字，向它收敛既安全又能补回漏买。
+     */
+    String normalize(String raw, java.util.Collection<String> targets) {
+        if (raw == null || raw.isEmpty()) return raw;
+        if (targets.contains(raw)) return raw;
+        for (String candidate : targets) {
+            // 长度差超过 1 的不可能是同一个卡名，先剪掉大部分候选。
+            if (Math.abs(candidate.length() - raw.length()) > 1) continue;
+            if (distance(raw, candidate) <= 1) return candidate;
+        }
+        return raw;
+    }
+    /** 允许一次替换/插入/删除的编辑距离，只判断是否在 limit 以内。 */
+    private static int distance(String a, String b) {
+        int[] prev = new int[b.length() + 1], cur = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) prev[j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            cur[0] = i;
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+            }
+            int[] swap = prev; prev = cur; cur = swap;
+        }
+        return prev[b.length()];
+    }
     /** 需要自行回收位图的调用方（阵容头像识别）使用独立流，避免破坏共享缓存。 */
     InputStream portraitStream(String id) throws IOException { return assets.open(portraitDir + "/" + id + ".png"); }
     /** 头像按需解码并复用；缺失时返回 null，界面自行回退到首字。 */
