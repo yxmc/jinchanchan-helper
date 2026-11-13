@@ -23,16 +23,17 @@ final class LineupVision implements AutoCloseable {
         Rect targetTitle,previewBounds;
         Point formationIcon,closeButton,importButton,replaceButton,applyButton,goldButton;
         PortraitMatcher.Row heroes;Bitmap preview;int[] rowSignature;
-        Rect find(String word,int left,int top,int right,int bottom) {
-            String key=normalize(word); Rect area=new Rect(left,top,right,bottom);Rect best=null;
-            for(Entry e:entries)if(e.text.contains(key)&&area.contains(e.box.centerX(),e.box.centerY())&&
+        Rect find(String word,int[] area) {
+            String key=normalize(word); Rect region=new Rect(area[0],area[1],area[2],area[3]);Rect best=null;
+            for(Entry e:entries)if(e.text.contains(key)&&region.contains(e.box.centerX(),e.box.centerY())&&
                 (best==null || e.box.width()*e.box.height()<best.width()*best.height()))best=e.box;
             return best;
         }
-        boolean has(String word){return find(word,0,0,2670,1200)!=null;}
+        boolean has(String word,int width,int height){return find(word,new int[]{0,0,width,height})!=null;}
     }
+    /** 头像描迹与版式解耦：这里只加载目录头像，几何参数由每次 read 传入的版式决定。 */
     LineupVision(Context context, ChampionCatalog catalog) {
-        try(InputStream in=context.getAssets().open("templates/lineup-button.bin")) {
+        try(InputStream in=context.getAssets().open(LineupLayout.ICON_ASSET)) {
             byte[] bytes=in.readAllBytes();menuAnchor=new int[bytes.length];for(int i=0;i<bytes.length;i++)menuAnchor[i]=bytes[i]&255;
         }catch(IOException e){throw new IllegalStateException("缺少阵容入口模板",e);}
         try {
@@ -46,14 +47,15 @@ final class LineupVision implements AutoCloseable {
             }
         }catch(IOException e){throw new IllegalStateException("阵容头像目录读取失败",e);}
     }
-    Screen read(Bitmap image,String expected,boolean wantPortraits) { return read(image,expected,wantPortraits,false); }
-    Screen read(Bitmap image,String expected,boolean wantPortraits,boolean forceThird) {
+    Screen read(Bitmap image,LineupLayout.Spec spec,String expected,boolean wantPortraits) { return read(image,spec,expected,wantPortraits,false); }
+    Screen read(Bitmap image,LineupLayout.Spec spec,String expected,boolean wantPortraits,boolean forceThird) {
         Screen out=new Screen();Bitmap copy=image.copy(Bitmap.Config.ARGB_8888,false);Task<Text> task=null;
         try {
             task=ocr.process(InputImage.fromBitmap(copy,0)); Text text=Tasks.await(task,3,TimeUnit.SECONDS);
             for(Text.TextBlock block:text.getTextBlocks())for(Text.Line line:block.getLines()) {
                 if(line.getBoundingBox()!=null)out.entries.add(new Entry(line.getText(),line.getBoundingBox()));
                 for(Text.Element element:line.getElements())if(element.getBoundingBox()!=null)out.entries.add(new Entry(element.getText(),element.getBoundingBox()));
+                // 竖排/拆字时整行被切碎，按块拼接后重新定位关键词框
                 StringBuilder joined=new StringBuilder();List<Text.Element> elements=line.getElements();
                 for(Text.Element e:elements)joined.append(normalize(e.getText()));
                 for(String word:new String[]{"导入代码","已达到收藏上限","请选择已收藏的阵容进行替换","购买经验","请选择一个强化符文"}) {
@@ -64,62 +66,63 @@ final class LineupVision implements AutoCloseable {
             }
         }catch(Exception e){throw new IllegalStateException("阵容界面识别暂未成功",e);}
         finally { if(task==null||task.isComplete())copy.recycle();else task.addOnCompleteListener(Runnable::run,t->copy.recycle()); }
-        Rect header=out.find("阵容",400,75,850,230), prompt=out.find("提示",400,75,1700,230);
-        Rect importBox=out.find("导入代码",1200,75,1750,240);
-        if(importBox==null)importBox=out.find("代码",1200,75,1750,240);
-        if(importBox==null)importBox=out.find("导入",1200,75,1750,240);
-        if(importBox==null)importBox=out.find("导人",1200,75,1750,240);
+        Rect header=out.find("阵容",spec.headerArea), prompt=out.find("提示",spec.promptArea);
+        Rect importBox=out.find("导入代码",spec.importArea);
+        // OCR 常把「码」认成「马」或漏字，逐级放宽关键词。
+        if(importBox==null)importBox=out.find("代码",spec.importArea);
+        if(importBox==null)importBox=out.find("导入",spec.importArea);
+        if(importBox==null)importBox=out.find("导人",spec.importArea);
         out.importButton=center(importBox);
-        out.replacement=out.has("已达到收藏上限")||out.has("请选择已收藏");
+        out.replacement=out.has("已达到收藏上限",image.getWidth(),image.getHeight())||out.has("请选择已收藏",image.getWidth(),image.getHeight());
         out.menu=header!=null&&out.importButton!=null&&!out.replacement;
         Rect closeHeader=out.replacement?prompt:header;
-        if(closeHeader!=null)out.closeButton=new Point(2215+closeHeader.left-525,157);
-        out.replaceButton=center(out.find("替换",1900,820,2310,1140));
-        int[][] titleBands={{210,325},{510,640},{810,940}};
-        int[][] buttonBands={{220,500},{510,810},{820,1140}};
+        if(closeHeader!=null)out.closeButton=new Point(closeHeader.left+spec.closeDx,spec.closeY);
+        out.replaceButton=center(out.find("替换",spec.replaceArea));
         Rect[] titles=new Rect[3],buttons=new Rect[3];boolean[] applied=new boolean[3];
         for(int row=0;row<3;row++) {
-            for(Entry entry:out.entries) if(entry.box.centerX()>=480&&entry.box.centerX()<1950&&entry.box.centerY()>=titleBands[row][0]&&entry.box.centerY()<titleBands[row][1]&&LineupCode.titleMatches(expected,entry.text))titles[row]=entry.box;
-            buttons[row]=out.find("应用",1900,buttonBands[row][0],2310,buttonBands[row][1]);
-            Rect cancel=out.find("取消",1900,buttonBands[row][0],2310,buttonBands[row][1]);
+            int[] titles_=spec.titleBand(row), buttons_=spec.buttonBand(row);
+            for(Entry entry:out.entries) if(entry.box.centerX()>=spec.titleLeft&&entry.box.centerX()<spec.titleRight&&entry.box.centerY()>=titles_[0]&&entry.box.centerY()<titles_[1]&&LineupCode.titleMatches(expected,entry.text))titles[row]=entry.box;
+            buttons[row]=out.find("应用",new int[]{spec.buttonLeft,buttons_[0],spec.buttonRight,buttons_[1]});
+            Rect cancel=out.find("取消",new int[]{spec.buttonLeft,buttons_[0],spec.buttonRight,buttons_[1]});
             applied[row]=cancel!=null;if(buttons[row]==null)buttons[row]=cancel;
             if(buttons[row]!=null)out.favoriteRows++;
         }
-        // A full collection always targets slot 3, even if another row has the same name.
+        // 满收藏固定打第三套，即使别的行同名也不换行
         if(!forceThird&&out.favoriteRows<3 && titles[2]==null)for(int row=0;row<3;row++)if(titles[row]!=null){out.targetRow=row;break;}
         out.targetTitle=titles[out.targetRow];out.targetMatches=out.targetTitle!=null;out.targetApplied=applied[out.targetRow];
         if(!out.targetApplied)out.applyButton=center(buttons[out.targetRow]);
         int[] screenPixels=new int[image.getWidth()*image.getHeight()];image.getPixels(screenPixels,0,image.getWidth(),0,0,image.getWidth(),image.getHeight());
-        out.formationIcon=findIcon(screenPixels,image.getWidth());
-        if(out.menu)out.rowSignature=PortraitMatcher.descriptor(screenPixels,image.getWidth(),535,335+out.targetRow*304,1350,90);
-        out.board=(out.has("购买经验")||out.formationIcon!=null)&&!out.has("请选择一个强化符文")&&!out.has("对局结束")&&!out.has("选择强化符文")&&!out.has("再来一局")&&!out.has("返回大厅")&&!out.has("退出对局");
+        out.formationIcon=findIcon(screenPixels,image.getWidth(),spec);
+        if(out.menu)out.rowSignature=PortraitMatcher.descriptor(screenPixels,image.getWidth(),spec.rowSignature(out.targetRow)[0],spec.rowSignature(out.targetRow)[1],spec.rowSignature(out.targetRow)[2],spec.rowSignature(out.targetRow)[3]);
+        out.board=(out.has("购买经验",image.getWidth(),image.getHeight())||out.formationIcon!=null)&&!out.has("请选择一个强化符文",image.getWidth(),image.getHeight())&&!out.has("对局结束",image.getWidth(),image.getHeight())&&!out.has("选择强化符文",image.getWidth(),image.getHeight())&&!out.has("再来一局",image.getWidth(),image.getHeight())&&!out.has("返回大厅",image.getWidth(),image.getHeight())&&!out.has("退出对局",image.getWidth(),image.getHeight());
         if(out.menu&&out.targetMatches&&wantPortraits) {
-            int[] pixels=new int[image.getWidth()*image.getHeight()];image.getPixels(pixels,0,image.getWidth(),0,0,image.getWidth(),image.getHeight());
-            out.heroes=PortraitMatcher.readRow(pixels,image.getWidth(),image.getHeight(),portraits,out.targetRow);
+            out.heroes=PortraitMatcher.readRow(screenPixels,image.getWidth(),spec,out.targetRow,portraits);
             int top=out.targetTitle.top-8;
-            int bottom=out.heroes.count>0?out.heroes.y+152:out.targetTitle.bottom+210;
+            int bottom=out.heroes.count>0?out.heroes.y+spec.previewRowHeight:out.targetTitle.bottom+210;
             int left=out.heroes.count>0?Math.min(out.targetTitle.left,out.heroes.x)-8:out.targetTitle.left-8;
             Point targetButton=center(buttons[out.targetRow]);
-            int buttonLeft=targetButton==null?2035:targetButton.x-100;
-            int right=out.heroes.count>0?out.heroes.x+(out.heroes.count-1)*154+108+10:buttonLeft-2;
-            right=Math.min(right,buttonLeft-2);bottom=Math.min(bottom,1110);
+            int buttonLeft=targetButton==null?spec.previewRightMax:targetButton.x-spec.buttonHalfWidth;
+            int right=out.heroes.count>0?out.heroes.x+(out.heroes.count-1)*spec.avatarPitch+spec.avatar[2]+10:buttonLeft-2;
+            right=Math.min(right,buttonLeft-2);bottom=Math.min(bottom,spec.previewBottomMax);
             out.previewBounds=new Rect(Math.max(0,left),Math.max(0,top),right,bottom);
             for(String message:new String[]{"收藏成功","导入成功","阵容收藏成功"}) {
-                Rect toast=out.find(message,0,0,image.getWidth(),image.getHeight());
+                Rect toast=out.find(message,new int[]{0,0,image.getWidth(),image.getHeight()});
                 if(toast!=null&&Rect.intersects(toast,out.previewBounds))out.previewBlocked=true;
             }
             out.preview=Bitmap.createBitmap(image,out.previewBounds.left,out.previewBounds.top,out.previewBounds.width(),out.previewBounds.height());
         }
         return out;
     }
-    private Point findIcon(int[] pixels,int width) {
+    /** 在棋盘右上角搜索阵容图标模板；相似度 RMS 小于版式门限视为在棋盘上。 */
+    private Point findIcon(int[] pixels,int width,LineupLayout.Spec spec) {
+        int[] area=spec.iconSearch;int size=area[4];
         double best=Double.MAX_VALUE;Point result=null;
-        for(int y=25;y<=53;y+=2)for(int x=2200;x<=2340;x+=2) {
-            int[] candidate=PortraitMatcher.descriptor(pixels,width,x,y,64,64);double sum=0;
+        for(int y=area[1];y<=area[3];y+=2)for(int x=area[0];x<=area[2];x+=2) {
+            int[] candidate=PortraitMatcher.descriptor(pixels,width,x,y,size,size);double sum=0;
             for(int i=0;i<candidate.length;i++){double d=candidate[i]-menuAnchor[i];sum+=d*d;}
-            double score=Math.sqrt(sum/candidate.length);if(score<best){best=score;result=new Point(x+32,y+32);}
+            double score=Math.sqrt(sum/candidate.length);if(score<best){best=score;result=new Point(x+size/2,y+size/2);}
         }
-        return best<=55?result:null;
+        return best<=spec.iconThreshold?result:null;
     }
     private static Point center(Rect rect) { return rect==null?null:new Point(rect.centerX(),rect.centerY()); }
     @Override public void close(){ocr.close();}

@@ -11,6 +11,12 @@ public class LineupChecks extends Instrumentation {
     @Override public void onCreate(Bundle args){super.onCreate(args);start();}
     private static void check(boolean ok,String message){if(!ok)throw new AssertionError(message);}
     private Bitmap fixture(String name){return BitmapFactory.decodeFile(new File(getTargetContext().getFilesDir(),"lineup-fixture-"+name+".jpg").getAbsolutePath());}
+    /** 样本截图固定为小米 14 原生分辨率，版式按尺寸查表。 */
+    private static LineupLayout.Spec spec(Bitmap image) {
+        LineupLayout.Spec spec=LineupLayout.find(image.getWidth(),image.getHeight());
+        check(spec!=null,"Unregistered fixture size "+image.getWidth()+"x"+image.getHeight());
+        return spec;
+    }
     private static void clear(LineupVision.Screen screen){if(screen.preview!=null)screen.preview.recycle();}
     private void checkPreview(LineupVision.Screen screen) {
         check(screen.preview!=null&&screen.previewBounds!=null,"Preview crop");
@@ -25,7 +31,7 @@ public class LineupChecks extends Instrumentation {
             for(String name:new String[]{"list","replace","applied","board"}) {
                 Bitmap image=fixture(name);check(image!=null,"Missing fixture "+name);
                 try {
-                    LineupVision.Screen screen=vision.read(image,"仙灵崔丝塔娜",true);
+                    LineupVision.Screen screen=vision.read(image,spec(image),"仙灵崔丝塔娜",true);
                     result.putString(name,"menu="+screen.menu+" replacement="+screen.replacement+" targetRow="+screen.targetRow+" title="+screen.targetMatches+
                         " applied="+screen.targetApplied+" board="+screen.board+" replace="+screen.replaceButton+" apply="+screen.applyButton+
                         (screen.heroes==null?"":" heroes="+screen.heroes.names+" unknown="+screen.heroes.unknown+" crop="+screen.previewBounds));
@@ -44,9 +50,9 @@ public class LineupChecks extends Instrumentation {
                         Bitmap changed=image.copy(Bitmap.Config.ARGB_8888,true);Bitmap cancel=Bitmap.createBitmap(image,2030,345,210,95);
                         try {
                             new Canvas(changed).drawBitmap(cancel,2030,953,null);
-                            LineupVision.Screen applied=vision.read(changed,"仙灵崔丝塔娜",true);
+                            LineupVision.Screen applied=vision.read(changed,spec(changed),"仙灵崔丝塔娜",true);
                             check(applied.targetMatches&&applied.targetApplied&&applied.applyButton==null,"Recognize third-row application confirmation");
-                            LineupVision.Screen original=vision.read(image,"仙灵崔丝塔娜",false);
+                            LineupVision.Screen original=vision.read(image,spec(image),"仙灵崔丝塔娜",false);
                             check(LineupImporter.sameRow(original.rowSignature,applied.rowSignature),"Unchanged portrait row survives applied state");
                             check(!LineupImporter.sameRow(original.rowSignature,new int[432]),"Different portrait row cannot confirm application");clear(original);
                             checkPreview(applied);clear(applied);
@@ -56,12 +62,12 @@ public class LineupChecks extends Instrumentation {
                         Bitmap changed=image.copy(Bitmap.Config.ARGB_8888,true);Bitmap first=Bitmap.createBitmap(image,470,220,1775,275);
                         try {
                             new Canvas(changed).drawBitmap(first,470,828,null);
-                            LineupVision.Screen imported=vision.read(changed,"林小北-日蚀卡尔玛",true);
+                            LineupVision.Screen imported=vision.read(changed,spec(changed),"林小北-日蚀卡尔玛",true);
                             check(imported.targetRow==2&&imported.targetMatches&&imported.heroes.complete()&&imported.heroes.names.equals(Arrays.asList(karma)),"Prefer imported third row over a duplicate name in the first row");
                             checkPreview(imported);clear(imported);
                             Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);paint.setColor(Color.rgb(20,25,35));new Canvas(changed).drawRect(1090,960,1500,1040,paint);
                             paint.setColor(Color.WHITE);paint.setTextSize(54);new Canvas(changed).drawText("收藏成功",1110,1020,paint);
-                            LineupVision.Screen blocked=vision.read(changed,"林小北-日蚀卡尔玛",true);
+                            LineupVision.Screen blocked=vision.read(changed,spec(changed),"林小北-日蚀卡尔玛",true);
                             check(blocked.previewBlocked,"Wait if a success toast overlaps the preview");clear(blocked);
                         }finally{first.recycle();changed.recycle();}
                     }

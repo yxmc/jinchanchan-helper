@@ -36,15 +36,18 @@ final class LineupImporter {
         if(SystemClock.elapsedRealtime()-phaseAt>25000){fail("阵容导入等待超时，未继续点击；请检查游戏界面后重试");return;}
         inFlight=true;
         boolean started=service.captureForLineup(image->{
-            // 阵容导入的标题带、按钮带与行签名均为小米 14 实测坐标，K80 尚未标定。
-            if(!PhoneLayout.supportsLineup(image.getWidth(),image.getHeight())){LineupVision.Screen s=new LineupVision.Screen();s.layoutValid=false;return s;}
+            // 阵容页版式按分辨率查表：小米 14 与 K80 各自一套实测坐标，未标定机型直接判不可用。
+            LineupLayout.Spec spec=LineupLayout.find(image.getWidth(),image.getHeight());
+            if(spec==null){LineupVision.Screen s=new LineupVision.Screen();s.layoutValid=false;return s;}
             if(vision==null)vision=new LineupVision(service,ChampionCatalog.of(service,service.championSet()));
             boolean want=preview==null&&needsPreview&&flow.stage()!=LineupFlow.Stage.PREPARE&&flow.stage()!=LineupFlow.Stage.WAIT_MENU;
-            LineupVision.Screen screen=vision.read(image,code.name,want,requireThirdRow);
+            LineupVision.Screen screen=vision.read(image,spec,code.name,want,requireThirdRow);
             if(!screen.menu&&!screen.replacement) {
                 BuyPolicy.Frame shop=service.readShopForLineup(image);screen.shopOpen=shop.shopOpen;
                 PhoneLayout.Spec shopSpec=PhoneLayout.find(image.getWidth(),image.getHeight());
-                if(shopSpec!=null)screen.goldButton=new Point(shopSpec.gold[0]+56+shop.offsetX,1067);
+                // 点击金币框中心收起商店：小米 14 圆心落在 (2526,1067)，与改造前硬编码的 1067 一致。
+                if(shopSpec!=null)screen.goldButton=new Point(shopSpec.gold[0]+shopSpec.gold[2]/2+shop.offsetX,
+                    shopSpec.gold[1]+shopSpec.gold[3]/2);
             }
             return screen;
         },(screen,error)->{
@@ -52,7 +55,7 @@ final class LineupImporter {
             if(!active){recycle(screen);return;}
             if(error!=null){if(++failures>=4){fail("阵容画面暂未读清："+error.getMessage());return;}schedule(500);return;}
             failures=0;
-            if(!screen.layoutValid){recycle(screen);fail("阵容导入仅支持已在小米 14 2670×1200 上标定的机型");return;}
+            if(!screen.layoutValid){recycle(screen);fail(LineupLayout.unsupportedMessage());return;}
             if(!service.importAllowed()){recycle(screen);phaseAt=SystemClock.elapsedRealtime();schedule(400);return;}
             if(needsPreview&&screen.previewBlocked){recycle(screen);service.importStatus("阵容导入：等待收藏成功提示消失后截图");schedule(400);return;}
             if(screen.favoriteRows>=3||screen.replacement)requireThirdRow=true;

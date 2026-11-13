@@ -112,8 +112,8 @@ public final class PhoneLayout {
         return true;
     }
     public static boolean accepts(int width, int height) { return find(width, height) != null; }
-    /** 仅小米 14 的阵容导入流程完成了坐标标定，其他机型不可进入该流程。 */
-    public static boolean supportsLineup(int width, int height) { return width == XIAOMI14.width && height == XIAOMI14.height; }
+    /** 阵容导入是否已在当前机型标定版式；未标定机型不允许进入导入流程。 */
+    public static boolean supportsLineup(int width, int height) { return LineupLayout.supports(width, height); }
     public static String unsupportedMessage() {
         StringBuilder sets = new StringBuilder();
         for (Spec spec : SPECS) {
