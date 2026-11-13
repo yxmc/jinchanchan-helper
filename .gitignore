@@ -1,0 +1,19 @@
+.tools/
+.gradle/
+**/build/
+local.properties
+captures/
+*.iml
+.idea/
+dist/
+**/__pycache__/
+# 项目记忆不入库
+.workbuddy/
+
+# Local signing material and packaged builds
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.apk
+*.aab
