@@ -59,9 +59,16 @@ public class CaptureService extends AccessibilityService {
     @Override protected void onServiceConnected() {
         instance = this;
         if (trace == null) trace = new AssistTrace(this);
-        record("service connected version=" + "0.11.9");
+        record("service connected version=" + appVersion());
         handler.removeCallbacks(health); handler.postDelayed(health, 1000);
         status("服务已连接。可显示悬浮窗进行商店识别。");
+    }
+    /** 从包信息读版本名，避免日志里的版本号随发版写死在源码中。 */
+    private String appVersion() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName == null ? "?" : info.versionName;
+        } catch (Exception e) { return "?"; }
     }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || event.getPackageName() == null) return;
