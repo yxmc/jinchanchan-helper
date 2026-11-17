@@ -1,5 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <!-- 投屏常驻取帧：前台服务本身、Android 14+ 的 mediaProjection 类型，以及常驻通知。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <instrumentation android:name=".OcrChecks" android:targetPackage="local.jcc.probe" android:label="Read-only OCR fixture check" />
     <instrumentation android:name=".DeckChecks" android:targetPackage="local.jcc.probe" android:label="Isolated named deck checks" />
     <instrumentation android:name=".LineupChecks" android:targetPackage="local.jcc.probe" android:label="Read-only lineup fixture checks" />
@@ -19,5 +23,8 @@
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
             <meta-data android:name="android.accessibilityservice" android:resource="@xml/capture_service" />
         </service>
+        <!-- 投屏取帧通道：仅持有 MediaProjection 会话并出帧，不出现在无障碍服务列表里。 -->
+        <service android:name=".ProjectionService" android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
     </application>
 </manifest>

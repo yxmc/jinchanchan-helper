@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏小图标必须是单色剪影，用 application 图标会在状态栏显示成一团白块。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3,5h18a1,1 0 0 1 1,1v9a1,1 0 0 1 -1,1h-7v2h3v2H7v-2h3v-2H3a1,1 0 0 1 -1,-1V6a1,1 0 0 1 1,-1zM10,8v5l4.5,-2.5z" />
+</vector>

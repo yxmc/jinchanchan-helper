@@ -153,6 +153,10 @@ final class ShopOcr implements AutoCloseable {
         return count;
     }
     private Reading read(Bitmap image, int[] rect, boolean digits) {
+        // 裁剪框可能因为按白像素列动态收缩而退化成极窄的小块；
+        // ML Kit 要求输入至少 32×32，太小的框会直接抛 MlKitException 让整帧识别失败。
+        // 这里统一兜底成空结果，交给上层按“本帧读不到”处理。
+        if (rect[2] < 32 || rect[3] < 32) return new Reading("", 0);
         Bitmap crop = Bitmap.createBitmap(rect[2] + 16, rect[3] + 16, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(crop);
         canvas.drawColor(Color.rgb(25, 30, 35));
@@ -306,18 +310,20 @@ final class ShopOcr implements AutoCloseable {
         // 第二道门禁：真正打开商店时，金币数字必然出现在标定位置。
         // 选强挑战、装备选择器等界面右下角是护符/装备图标，那里没有近白色数字（实测白像素为 0），
         // 据此可识别出“刷新按钮误匹配但并非商店”的情况，避免在非商店界面上点击而误消费。
+        //
+        // 但这里不能用金币白像素不足来否定商店判定：金币可能被单位特效/飘字遮挡、
+        // 数字刚滚动到一半，白像素会短暂偏低。实测因此把正在营业的商店判成关闭，
+        // 连续多帧 shop=false，表现为“商店明明开着却完全不动、只能自己手动买”。
+        // 因此金币不可读只降级为“本帧读不出金币”（照旧返回，不点击），不影响卡面识别。
         int goldInk = whiteInk(pixels, image.getWidth(), gold());
-        if (goldInk < MIN_GOLD_INK) {
-            f.shopOpen = false;
-            f.problem = "未在金币位置识别到数字，判定为非商店界面";
-            return f;
-        }
+        boolean goldVisible = goldInk >= MIN_GOLD_INK;
         Reading[] readings = batch(image);
         int batchGold = number(readings[10]);
         // 金币框只框数字、不含左侧金币图标；再做一次按白像素列精确定位的重识别，
         // 以免批次 OCR 把数字与背景花纹粘在一起。数字区读数为准，详见 pickGold。
         int digitsGold = readGoldDigitsOnly(image, pixels);
-        f.gold = pickGold(batchGold, digitsGold);
+        // 金币位置根本没有白色数字时（被遮挡/非商店界面），两路读数都不可信，直接判为读不出。
+        f.gold = goldVisible ? pickGold(batchGold, digitsGold) : -1;
         // 金铲铲单局金币不会超过上限，超出即判为不可信，宁可等待也不按错值决策。
         if (f.gold > MAX_GOLD) { f.gold = -1; f.problem = "金币读数超出合理范围"; }
         f.readable = f.gold >= 0;

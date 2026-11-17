@@ -22,9 +22,8 @@ public class MainActivity extends Activity {
     private CardPicker targetCards;
     private EditText deckNameInput, lineupCodes;
     private TextView codeSummary;
-    private ImageView lineupPreview;
     private Button copyLineup, importLineup, confirmLineup;
-    private String loadedTargets="", loadedPreview="";
+    private String loadedTargets="";
     private Spinner deckSpinner;
     private DeckStore deckStore;
     private java.util.List<DeckStore.Deck> savedDecks;
@@ -32,6 +31,10 @@ public class MainActivity extends Activity {
     private Switch autoRefresh;
     private Spinner championSeason;
     private CheckBox previewOnly;
+    private Spinner captureScheme;
+    private TextView captureHint;
+    private static final int REQUEST_PROJECTION = 21;
+    private android.media.projection.MediaProjectionManager projectionManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refresh = new Runnable() {
         @Override public void run() { update(); handler.postDelayed(this, 1000); }
@@ -87,9 +90,8 @@ public class MainActivity extends Activity {
         deckSpinner.setBackground(shape(FIELD, 10));
         decks.addView(deckSpinner, new LinearLayout.LayoutParams(-1, dp(48)));
         codeSummary = label("", 12, GOLD); space(decks, 8); decks.addView(codeSummary);
-        lineupPreview = new ImageView(this); lineupPreview.setAdjustViewBounds(true); lineupPreview.setVisibility(View.GONE);
-        lineupPreview.setPadding(0,dp(10),0,dp(6)); decks.addView(lineupPreview);
-        lineupPreview.setOnClickListener(v -> showLineupPreview());
+        // 阵容预览图已移除（2026-11-17）：截图功能取消后这里仍在显示以前保存的旧图，
+        // 表现为「复制阵容码」上面挂着一张过时的阵容截图，容易让人以为截图还在工作。
         LinearLayout codeActions = row(); copyLineup = button("复制阵容码", false); importLineup = button("在游戏中导入", false);
         weightedButton(codeActions, copyLineup); weightedButton(codeActions, importLineup); space(decks, 6); decks.addView(codeActions);
         copyLineup.setOnClickListener(v -> {
@@ -146,6 +148,41 @@ public class MainActivity extends Activity {
         });
 
         LinearLayout options = card(layout, "运行偏好", "关闭自动刷新时，手动刷新也会自动买卡。");
+        LinearLayout captureRow = row();
+        LinearLayout captureText = column(); captureText.addView(label("取帧方案", 15, INK));
+        captureText.addView(label("决定从哪里拿画面，识别与点击流程一致", 12, MUTED));
+        captureRow.addView(captureText, new LinearLayout.LayoutParams(0, -2, 1));
+        captureScheme = new Spinner(this, Spinner.MODE_DROPDOWN);
+        captureScheme.setBackground(shape(FIELD, 10));
+        ArrayAdapter<String> captureAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, CaptureScheme.LABELS) {
+            @Override public View getView(int position, View recycled, android.view.ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, recycled, parent);
+                view.setTextColor(INK); view.setTextSize(14); view.setPadding(dp(10), 0, dp(10), 0); return view;
+            }
+            @Override public View getDropDownView(int position, View recycled, android.view.ViewGroup parent) {
+                TextView view = (TextView) super.getDropDownView(position, recycled, parent);
+                view.setTextColor(INK); view.setBackgroundColor(CARD); view.setPadding(dp(14), dp(12), dp(14), dp(12)); return view;
+            }
+        };
+        captureAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        captureScheme.setAdapter(captureAdapter);
+        captureScheme.setSelection(CaptureScheme.index(CaptureScheme.selected(getSharedPreferences("probe", MODE_PRIVATE))));
+        captureScheme.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String scheme = CaptureScheme.fromIndex(position);
+                getSharedPreferences("probe", MODE_PRIVATE).edit().putString(CaptureScheme.PREF, scheme).apply();
+                if (CaptureService.instance != null) CaptureService.instance.setCaptureScheme(scheme);
+                updateCaptureHint();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        captureRow.addView(captureScheme, new LinearLayout.LayoutParams(dp(150), dp(48)));
+        options.addView(captureRow); space(options, 8);
+        captureHint = label("", 12, MUTED); captureHint.setLineSpacing(dp(3), 1); options.addView(captureHint);
+        Button authorize = button("授权 / 重新授权投屏取帧", false);
+        authorize.setOnClickListener(v -> requestProjection());
+        addButton(options, authorize);
+        space(options, 10);
         LinearLayout seasonRow = row();
         LinearLayout seasonText = column(); seasonText.addView(label("棋子赛季", 15, INK));
         seasonText.addView(label("影响搜索选卡、费用兜底与阵容头像", 12, MUTED));
@@ -393,6 +430,72 @@ public class MainActivity extends Activity {
             return context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName;
         } catch (android.content.pm.PackageManager.NameNotFoundException e) { return "?"; }
     }
+    /**
+     * 申请投屏取帧授权。系统每次会话都要重新确认，因此“重新授权”即重新走一遍这个弹窗；
+     * Android 14+ 还要求先有 mediaProjection 前台服务，这一步在 {@link ProjectionService} 内完成。
+     */
+    private void requestProjection() {
+        if (projectionManager == null)
+            projectionManager = (android.media.projection.MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        if (projectionManager == null) {
+            Toast.makeText(this, "此设备不支持投屏取帧，请使用无障碍截图", Toast.LENGTH_LONG).show();
+            return;
+        }
+        // 常驻通知需要通知权限才能显示（被拒绝也不影响取帧，只是少一条常驻提示）。
+        // Android 13 以下没有这个权限，直接申请会拿到一次无意义的请求。
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            try { requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQUEST_PROJECTION + 1); }
+            catch (RuntimeException ignored) {}
+        }
+        try {
+            // 部分国产 ROM（实测 K80 / HyperOS）的授权弹窗默认选「单个应用」，
+            // 那样只能录到本应用自己的界面、拍不到游戏，识别必然全黑。
+            // Android 14+ 用 MediaProjectionConfig 显式要求整个屏幕，弹窗就不再提供单应用选项。
+            Intent capture;
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                capture = projectionManager.createScreenCaptureIntent(
+                    android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay());
+            } else {
+                capture = projectionManager.createScreenCaptureIntent();
+            }
+            startActivityForResult(capture, REQUEST_PROJECTION);
+        } catch (RuntimeException e) {
+            Toast.makeText(this, "无法打开投屏授权：" + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_PROJECTION) return;
+        if (resultCode != RESULT_OK || data == null) {
+            Toast.makeText(this, "已取消投屏授权", Toast.LENGTH_SHORT).show();
+            updateCaptureHint();
+            return;
+        }
+        ProjectionService.start(this, resultCode, data);
+        getSharedPreferences("probe", MODE_PRIVATE).edit().putString(CaptureScheme.PREF, CaptureScheme.PROJECTION).apply();
+        if (captureScheme != null) captureScheme.setSelection(CaptureScheme.index(CaptureScheme.PROJECTION));
+        if (CaptureService.instance != null) CaptureService.instance.setCaptureScheme(CaptureScheme.PROJECTION);
+        Toast.makeText(this, "投屏取帧已授权，可显示悬浮窗开始识别", Toast.LENGTH_LONG).show();
+        // 会话建立与虚拟显示创建是异步的，稍后再刷新状态文案。
+        handler.postDelayed(this::updateCaptureHint, 600);
+    }
+    /** 刷新取帧方案的状态说明：让“已选投屏但还没授权”这种状态一眼可见。 */
+    private void updateCaptureHint() {
+        if (captureHint == null) return;
+        String scheme = CaptureScheme.selected(getSharedPreferences("probe", MODE_PRIVATE));
+        if (CaptureScheme.PROJECTION.equals(scheme)) {
+            boolean ready = ProjectionStream.ready();
+            captureHint.setTextColor(ready ? 0xff77d9b4 : GOLD);
+            captureHint.setText(ready
+                ? "投屏常驻流已就绪：识别实时取最新画面，不再受系统 334ms 截图间隔限制。"
+                : "尚未授权投屏取帧（" + (ProjectionService.lastError.isEmpty() ? "点下方按钮授权" : ProjectionService.lastError) +
+                  "）。未授权时识别会停在等待状态。");
+        } else {
+            captureHint.setTextColor(MUTED);
+            captureHint.setText("无障碍截图：由系统逐次截图，默认方案；两次截图至少间隔约 334ms。");
+        }
+    }
     private DeckStore.Deck editingDeck() {
         if (deckStore != null && editingDeckId != null) for (DeckStore.Deck d : deckStore.all()) if (d.id.equals(editingDeckId)) return d;
         return null;
@@ -402,24 +505,12 @@ public class MainActivity extends Activity {
         boolean code=deck!=null&&deck.isCode();copyLineup.setEnabled(code);importLineup.setEnabled(code);
         if (confirmLineup!=null) confirmLineup.setVisibility(code?View.VISIBLE:View.GONE);
         codeSummary.setText(!code?"手动卡组":deck.verified?"阵容码 · 英雄已确认":"阵容码 · "+(deck.note.isEmpty()?"首次导入后识别英雄":deck.note));
-        lineupPreview.setImageDrawable(null);lineupPreview.setVisibility(View.GONE);
-        if (code&&!deck.preview.isEmpty()) {
-            File image=new File(getFilesDir(),deck.preview); android.graphics.BitmapFactory.Options opts=new android.graphics.BitmapFactory.Options();opts.inSampleSize=2;
-            android.graphics.Bitmap bitmap=android.graphics.BitmapFactory.decodeFile(image.getAbsolutePath(),opts);
-            if (bitmap!=null){lineupPreview.setImageBitmap(bitmap);lineupPreview.setVisibility(View.VISIBLE);}
-        }
-    }
-    private void showLineupPreview() {
-        DeckStore.Deck deck=editingDeck();if(deck==null||deck.preview.isEmpty())return;
-        android.graphics.Bitmap bitmap=android.graphics.BitmapFactory.decodeFile(new File(getFilesDir(),deck.preview).getAbsolutePath());if(bitmap==null)return;
-        ImageView image=new ImageView(this);image.setImageBitmap(bitmap);image.setAdjustViewBounds(true);
-        new android.app.AlertDialog.Builder(this).setTitle(deck.name).setView(image).setPositiveButton("关闭",null).setOnDismissListener(d->bitmap.recycle()).show();
     }
     private void newDeckEditor() {
-        editingDeckId = null; deckNameInput.setText(""); targetCards.setValue(""); loadedTargets="";loadedPreview="";updateLineupView(null);deckNameInput.requestFocus();
+        editingDeckId = null; deckNameInput.setText(""); targetCards.setValue(""); loadedTargets="";updateLineupView(null);deckNameInput.requestFocus();
     }
     private void loadDeckEditor(DeckStore.Deck deck) {
-        editingDeckId = deck.id; deckNameInput.setText(deck.name); targetCards.setValue(deck.targets);loadedTargets=deck.targets;loadedPreview=deck.preview;updateLineupView(deck);
+        editingDeckId = deck.id; deckNameInput.setText(deck.name); targetCards.setValue(deck.targets);loadedTargets=deck.targets;updateLineupView(deck);
     }
     private void reloadDeckChoices(String selected) {
         savedDecks = deckStore.all();
@@ -479,15 +570,22 @@ public class MainActivity extends Activity {
         serviceBadge.setText(connected ? "● 无障碍服务已连接" : "○ 需要开启无障碍服务");
         serviceBadge.setTextColor(connected ? 0xff77d9b4 : GOLD);
         status.setText(getSharedPreferences("probe", MODE_PRIVATE).getString("status", "开启服务后，即可使用悬浮窗。"));
+        updateCaptureHint();
     }
     @Override protected void onResume() {
         super.onResume();
         if (deckStore != null && editingDeckId != null) {
             DeckStore.Deck current=deckStore.current();
-            if (!current.id.equals(editingDeckId) || !current.targets.equals(loadedTargets) || !current.preview.equals(loadedPreview)) reloadDeckChoices(current.id);
+            // 预览图已不再生成，变更检测只看卡组与名单。
+            if (!current.id.equals(editingDeckId) || !current.targets.equals(loadedTargets)) reloadDeckChoices(current.id);
             else updateLineupView(current);
         }
         if (goldReserve != null) goldReserve.setText(String.valueOf(getSharedPreferences("probe", MODE_PRIVATE).getInt("reserve", GoldReserve.DEFAULT)));
+        if (captureScheme != null) {
+            int index = CaptureScheme.index(CaptureScheme.selected(getSharedPreferences("probe", MODE_PRIVATE)));
+            if (captureScheme.getSelectedItemPosition() != index) captureScheme.setSelection(index);
+        }
+        updateCaptureHint();
         if (autoRefresh != null) autoRefresh.setChecked(getSharedPreferences("probe", MODE_PRIVATE).getBoolean("autoRefresh", false));
         if (championSeason != null && targetCards != null) {
             int set = ChampionCatalog.selectedSet(getSharedPreferences("probe", MODE_PRIVATE));

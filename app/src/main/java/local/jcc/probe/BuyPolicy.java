@@ -40,6 +40,15 @@ public final class BuyPolicy {
     /** 连续多少帧看不到商店按钮才认定玩家真的离开了商店（宽限期内保留卡面稳定度等状态）。 */
     private static final int CLOSED_GRACE_FRAMES = 4;
     private int closedFrames;
+    /**
+     * 上一张点击后没生效的卡位，以及当时的金币数。
+     * 同一位置短时间内重复点击会被游戏忽略，冷却期内跳过这一格，
+     * 让点击都花在真正能成交的地方。金币发生变化即说明这条决策已经过期，自动解除。
+     */
+    private int heldSlot = -1, heldGold = -1;
+    /** 卡位冷却最多持续多少帧（约 0.6~1 秒），防止金币长期不变时永久跳过该格。 */
+    private static final int HELD_MAX_FRAMES = 3;
+    private int heldFrames;
     public int bought, refreshed;
 
     public BuyPolicy(List<String> targets, int reserve, boolean autoRefresh) {
@@ -72,15 +81,27 @@ public final class BuyPolicy {
             }
         }
         if (pending != null) {
+            // 一次手势点了 pending.slots 里的每一格：变空的算买成，其余视为这一下没被游戏接受。
             int completed = 0;
-            for (int slot : pending.slots) if ("".equals(frame.names[slot])) completed++;
+            int attempted = -1;
+            for (int slot : pending.slots) {
+                if ("".equals(frame.names[slot])) completed++;
+                else if (attempted < 0) attempted = slot;
+            }
             if (completed > 0) {
                 bought += completed;
                 pending = null; misses = 0;
+                // 同一手里没买成的那格先冷却，下一帧优先买别的卡或稍后再试这一格。
+                if (attempted >= 0) { heldSlot = attempted; heldGold = frame.gold; heldFrames = 0; }
             } else if (!Arrays.equals(frame.names, previousNames)) {
-                // 卡面变了但目标格没变空：这一次点击没生效（实测同一手势里多张卡的
-                // 后续点击会被游戏忽略）。不计数，但要让下一次决策重新规划再点一次。
+                // 卡面变了但一格都没变空：这一整手都没被游戏接受。
+                // 实测同一位置在 ~350ms 内被连点两次时游戏会忽略第二次（金币完全不动），
+                // 于是“点一次→没生效→立刻重点”会白耗掉一半点击，整体变慢。
+                // 因此记下第一格冷却，其余格子下一帧照常可以再试。
                 pending = null; misses = 0;
+                heldSlot = attempted;
+                heldGold = frame.gold;
+                heldFrames = 0;
             } else if (frame.readable && ++misses >= (frame.gold == previousGold ? 2 : 3)) {
                 // Income and imperfect gold OCR must not keep a completed gesture pending forever.
                 // Retry only by planning from this fresh frame; never count an unconfirmed purchase.
@@ -90,14 +111,24 @@ public final class BuyPolicy {
         List<Integer> slots = new ArrayList<>();
         int balance = frame.gold;
         boolean targetPresent = false, unknownCost = false;
+        // 冷却中的卡位先跳过；金币一变说明游戏已经结算，冷却立刻解除。
+        if (heldSlot >= 0) {
+            boolean goldMoved = frame.gold != heldGold;
+            // 兜底：金币长时间不变（例如这一格本来就不是可买的卡）时也要解除，
+            // 否则会永远跳过这一格、卡在“等待重新点击目标卡”。
+            if (goldMoved || ++heldFrames > HELD_MAX_FRAMES) { heldSlot = -1; heldGold = -1; heldFrames = 0; }
+        }
         for (int i = 0; i < 5; i++) if (targets.contains(frame.names[i])) {
             targetPresent = true;
             int cost = frame.costs[i];
             if (cost < 1 || cost > 10) { unknownCost = true; continue; }
             if (balance < cost) continue;
+            if (i == heldSlot) continue;
             slots.add(i); balance -= cost;
         }
         if (!slots.isEmpty()) return batch(slots);
+        // 有目标但唯一的那张正在冷却：等冷却解除，不要空转去点别的。
+        if (targetPresent && heldSlot >= 0) return decision(Kind.WAIT, -1, "等待重新点击目标卡");
         if (targetPresent) return decision(Kind.WAIT, -1, unknownCost ? "等待读取目标费用" : "金币不足以购买目标卡");
         if (!frame.readable) return decision(Kind.WAIT, -1,
             (frame.problem.isEmpty() ? "当前帧暂未读清" : frame.problem) + "，继续识别");
@@ -107,12 +138,12 @@ public final class BuyPolicy {
         return decision(Kind.REFRESH, -1, "没有目标，刷新商店");
     }
     /**
-     * 记录本次实际发出的动作。一次手势只点一张卡（同帧多张的后续点击会被游戏忽略），
-     * 因此 BUY 只按第一个格子的点击结果确认，其余格子留给下一帧重新规划再买。
+     * 记录本次实际发出的动作。v0.11.8 方案把本帧所有可买的目标卡塞进同一个手势一次点完，
+     * 因此 BUY 按整组格子一起确认：哪几格变空就算买成几张。
      */
     public void sent(Decision action, Frame frame) {
         if (action.kind != Kind.BUY && action.kind != Kind.REFRESH) throw new IllegalArgumentException();
-        pending = action.kind == Kind.BUY ? new Decision(new int[]{action.slots[0]}, action.message) : action;
+        pending = action;
         previousGold = frame.gold;
         previousNames = frame.names.clone();
         misses = 0; refreshTransition = false;
@@ -146,7 +177,7 @@ public final class BuyPolicy {
         }
         return agree >= 4;
     }
-    public void shopClosed() { pending = null; previousNames = null; misses = 0; stableReads = 0; stableNames = null; stableCosts = null; refreshTransition = false; closedFrames = 0; }
+    public void shopClosed() { pending = null; previousNames = null; misses = 0; stableReads = 0; stableNames = null; stableCosts = null; refreshTransition = false; closedFrames = 0; heldSlot = -1; heldGold = -1; heldFrames = 0; }
     public void setAutoRefresh(boolean enabled) { autoRefresh = enabled; }
     public void setReserve(int value) {
         if (value < 0 || value > 999) throw new IllegalArgumentException("保留金币应为 0～999");

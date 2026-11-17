@@ -12,17 +12,38 @@ import java.io.*;
 
 final class LineupVision implements AutoCloseable {
     private final TextRecognizer ocr=TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build());
-    private int[] menuAnchor;
+    private final Context context;
+    /**
+     * 阵容入口图标描迹，按机型 asset 路径缓存。
+     *
+     * <p>**不能共用一套**：手机上是独立的「阵容」图标，平板（OPPO Pad 4 Pro）右上只有
+     * 「菜单」与「设置」两个圆图标、形状完全不同。用手机模板匹配平板，RMS 远高于门限，
+     * `formationIcon` 恒为 null，导入流程就一直卡在「等待阵容列表」，永远点不到菜单。
+     */
+    private final Map<String,int[]> anchors=new HashMap<>();
     private final List<PortraitMatcher.Reference> portraits=new ArrayList<>();
     static String normalize(String s) { return s.replaceAll("[^\\p{IsHan}A-Za-z0-9]", ""); }
     static final class Entry { String text;Rect box; Entry(String t,Rect b){text=normalize(t);box=new Rect(b);} }
     static final class Screen {
         final List<Entry> entries=new ArrayList<>();
         boolean layoutValid=true,shopOpen,board,menu,replacement,targetMatches,targetApplied,previewBlocked;
+        /** 尺寸与版式不匹配但还没到判定失败的帧数（转屏过渡），导入器据此重试而不是报错。 */
+        boolean notReady;
         int favoriteRows,targetRow=2;
         Rect targetTitle,previewBounds;
         Point formationIcon,closeButton,importButton,replaceButton,applyButton,goldButton;
         PortraitMatcher.Row heroes;Bitmap preview;int[] rowSignature;
+        /**
+         * 需要为第 10 张卡滑动时，滑动的起点。
+         *
+         * <p>取目标行卡片带的中部靠左位置：纵向落在卡片中心，横向避开最右侧的滚动条与
+         * 「应用/取消」按钮。拖动只改横向偏移，因此必须与目标行同高，否则会滑到别的行。
+         */
+        Point heroSwipeFrom;
+        /** 收藏上限弹窗的替换区里实际 OCR 到的文字，用于排查「按钮认不到」。 */
+        String replaceAreaText="";
+        /** 阵容列表的两个判据是否各自认出，用于排查「读到很多字却判成未识别页面」。 */
+        boolean menuHeaderOk,menuImportOk;
         Rect find(String word,int[] area) {
             String key=normalize(word); Rect region=new Rect(area[0],area[1],area[2],area[3]);Rect best=null;
             for(Entry e:entries)if(e.text.contains(key)&&region.contains(e.box.centerX(),e.box.centerY())&&
@@ -33,9 +54,7 @@ final class LineupVision implements AutoCloseable {
     }
     /** 头像描迹与版式解耦：这里只加载目录头像，几何参数由每次 read 传入的版式决定。 */
     LineupVision(Context context, ChampionCatalog catalog) {
-        try(InputStream in=context.getAssets().open(LineupLayout.ICON_ASSET)) {
-            byte[] bytes=in.readAllBytes();menuAnchor=new int[bytes.length];for(int i=0;i<bytes.length;i++)menuAnchor[i]=bytes[i]&255;
-        }catch(IOException e){throw new IllegalStateException("缺少阵容入口模板",e);}
+        this.context=context;
         try {
             for(ChampionCatalog.Champion row:catalog.champions()) {
                 String id=row.id;
@@ -72,18 +91,39 @@ final class LineupVision implements AutoCloseable {
         if(importBox==null)importBox=out.find("代码",spec.importArea);
         if(importBox==null)importBox=out.find("导入",spec.importArea);
         if(importBox==null)importBox=out.find("导人",spec.importArea);
+        if(importBox==null)importBox=out.find("導",spec.importArea);
         out.importButton=center(importBox);
+        out.menuHeaderOk=header!=null;out.menuImportOk=out.importButton!=null;
         out.replacement=out.has("已达到收藏上限",image.getWidth(),image.getHeight())||out.has("请选择已收藏",image.getWidth(),image.getHeight());
-        out.menu=header!=null&&out.importButton!=null&&!out.replacement;
+        // 「阵容列表」要求抬头与导入按钮同时认出。实测同一画面同一坐标点击后，有时只读到 71 条文字
+        // 却认不出其中一项（OCR 把「阵容」或「导入代码」整块漏掉），于是被误判成「未识别页面」。
+        // 只要抬头认出、且不是收藏上限弹窗，就按阵容列表处理——导入按钮认不到会由导入器单独重试。
+        out.menu=(header!=null||out.importButton!=null)&&!out.replacement;
         Rect closeHeader=out.replacement?prompt:header;
         if(closeHeader!=null)out.closeButton=new Point(closeHeader.left+spec.closeDx,spec.closeY);
-        out.replaceButton=center(out.find("替换",spec.replaceArea));
+        // 只放宽到「替换」两个字的常见误读，不用单字：单字容易在密集文字里误命中。
+        // （替换区里除了这个按钮没有别的文字，但 OCR 会把邻近行标题的碎片也塞进来。）
+        out.replaceButton=center(findButton(out,spec.replaceArea,"替换","替換","替换","替挽"));
+        // OCR 偶尔读不出按钮文字。把替换区里实际读到的字记下来，否则只能靠猜是「字被认错」
+        // 还是「按钮本来就不存在」（实测第三套已是同一套阵容时，游戏会换成别的提示）。
+        StringBuilder replaceText=new StringBuilder();
+        for(Entry entry:out.entries) {
+            int cx=entry.box.centerX(),cy=entry.box.centerY();
+            if(cx>=spec.replaceArea[0]&&cx<=spec.replaceArea[2]&&cy>=spec.replaceArea[1]&&cy<=spec.replaceArea[3]) {
+                if(replaceText.length()>0)replaceText.append('/');
+                replaceText.append(entry.text);
+            }
+        }
+        out.replaceAreaText=replaceText.toString();
         Rect[] titles=new Rect[3],buttons=new Rect[3];boolean[] applied=new boolean[3];
         for(int row=0;row<3;row++) {
             int[] titles_=spec.titleBand(row), buttons_=spec.buttonBand(row);
             for(Entry entry:out.entries) if(entry.box.centerX()>=spec.titleLeft&&entry.box.centerX()<spec.titleRight&&entry.box.centerY()>=titles_[0]&&entry.box.centerY()<titles_[1]&&LineupCode.titleMatches(expected,entry.text))titles[row]=entry.box;
-            buttons[row]=out.find("应用",new int[]{spec.buttonLeft,buttons_[0],spec.buttonRight,buttons_[1]});
-            Rect cancel=out.find("取消",new int[]{spec.buttonLeft,buttons_[0],spec.buttonRight,buttons_[1]});
+            int[] buttonArea=new int[]{spec.buttonLeft,buttons_[0],spec.buttonRight,buttons_[1]};
+            // 只放宽到「应用」两个字的常见误读，**不要放宽成单字**：按钮区在「已应用」状态下
+            // 显示的是「取消」，用单字「应」会把别处的字误命中，导致 applied 判断错乱。
+            buttons[row]=findButton(out,buttonArea,"应用","應用","应周","应田");
+            Rect cancel=out.find("取消",buttonArea);
             applied[row]=cancel!=null;if(buttons[row]==null)buttons[row]=cancel;
             if(buttons[row]!=null)out.favoriteRows++;
         }
@@ -97,24 +137,47 @@ final class LineupVision implements AutoCloseable {
         out.board=(out.has("购买经验",image.getWidth(),image.getHeight())||out.formationIcon!=null)&&!out.has("请选择一个强化符文",image.getWidth(),image.getHeight())&&!out.has("对局结束",image.getWidth(),image.getHeight())&&!out.has("选择强化符文",image.getWidth(),image.getHeight())&&!out.has("再来一局",image.getWidth(),image.getHeight())&&!out.has("返回大厅",image.getWidth(),image.getHeight())&&!out.has("退出对局",image.getWidth(),image.getHeight());
         if(out.menu&&out.targetMatches&&wantPortraits) {
             out.heroes=PortraitMatcher.readRow(screenPixels,image.getWidth(),spec,out.targetRow,portraits);
-            int top=out.targetTitle.top-8;
-            int bottom=out.heroes.count>0?out.heroes.y+spec.previewRowHeight:out.targetTitle.bottom+210;
-            int left=out.heroes.count>0?Math.min(out.targetTitle.left,out.heroes.x)-8:out.targetTitle.left-8;
-            Point targetButton=center(buttons[out.targetRow]);
-            int buttonLeft=targetButton==null?spec.previewRightMax:targetButton.x-spec.buttonHalfWidth;
-            int right=out.heroes.count>0?out.heroes.x+(out.heroes.count-1)*spec.avatarPitch+spec.avatar[2]+10:buttonLeft-2;
-            right=Math.min(right,buttonLeft-2);bottom=Math.min(bottom,spec.previewBottomMax);
-            out.previewBounds=new Rect(Math.max(0,left),Math.max(0,top),right,bottom);
-            for(String message:new String[]{"收藏成功","导入成功","阵容收藏成功"}) {
-                Rect toast=out.find(message,new int[]{0,0,image.getWidth(),image.getHeight()});
-                if(toast!=null&&Rect.intersects(toast,out.previewBounds))out.previewBlocked=true;
+            if(out.heroes.moreRight) {
+                // 拖动起点必须落在**本行卡片**内：纵向直接用实测的首卡 y（标定表的行 y 与
+                // 真机渲染有几十像素偏差），横向取首卡与视口左沿中较右者，避开滚动条与按钮。
+                int side=spec.avatar(out.targetRow)[2];
+                int left=Math.max(spec.avatar(out.targetRow)[0],out.heroes.x);
+                out.heroSwipeFrom=new Point(left+side/2,out.heroes.y+side/2);
             }
-            out.preview=Bitmap.createBitmap(image,out.previewBounds.left,out.previewBounds.top,out.previewBounds.width(),out.previewBounds.height());
         }
+        // 阵容预览截图已取消（2026-11-17 用户要求）：保存预览要在收尾阶段再做一次裁剪，
+        // 而在「已在游戏中导入」这条主路径上它只是额外负担——每帧多一次整屏裁剪拷贝，
+        // 收尾时还会因为拿不到图直接判「没有取得阵容预览，请重新导入」，把已经成功的导入变成失败。
+        // 头像识别与它无关，仍按上面的 wantPortraits 走。previewBounds 保留，供调试查看识别落点。
         return out;
+    }
+    /**
+     * 在指定区域里按关键词逐级放宽地找按钮文字。
+     *
+     * <p>**为什么需要容错**：按钮只有两个字（替换/应用），OCR 少认一个字整帧就失败。
+     * 实测「替换界面明明开着却报没识别到替换按钮」就是这类漏字——单帧漏字很随机，
+     * 与阵容内容无关。这里只放宽到「单字」为止：这些区域里除了按钮本身没有别的文字，
+     * 而且 `replaceArea` 已收窄到只含第三行按钮，放宽不会误命中别的东西。
+     */
+    private static Rect findButton(Screen screen,int[] area,String... keywords) {
+        for(String keyword:keywords) {
+            Rect box=screen.find(keyword,area);
+            if(box!=null)return box;
+        }
+        return null;
+    }
+    private int[] anchorFor(LineupLayout.Spec spec) {
+        int[] cached=anchors.get(spec.iconAsset);
+        if(cached!=null)return cached;
+        try(InputStream in=context.getAssets().open(spec.iconAsset)) {
+            byte[] bytes=in.readAllBytes();int[] values=new int[bytes.length];
+            for(int i=0;i<bytes.length;i++)values[i]=bytes[i]&255;
+            anchors.put(spec.iconAsset,values);return values;
+        }catch(IOException e){throw new IllegalStateException("缺少阵容入口模板 "+spec.iconAsset,e);}
     }
     /** 在棋盘右上角搜索阵容图标模板；相似度 RMS 小于版式门限视为在棋盘上。 */
     private Point findIcon(int[] pixels,int width,LineupLayout.Spec spec) {
+        int[] menuAnchor=anchorFor(spec);
         int[] area=spec.iconSearch;int size=area[4];
         double best=Double.MAX_VALUE;Point result=null;
         for(int y=area[1];y<=area[3];y+=2)for(int x=area[0];x<=area[2];x+=2) {
