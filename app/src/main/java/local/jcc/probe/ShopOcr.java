@@ -50,10 +50,25 @@ final class ShopOcr implements AutoCloseable {
 
     boolean cachedLastFrame() { return cached; }
 
+    /**
+     * 卡名字模自举采集器。为 null 表示不采集。
+     *
+     * <p>字模比 OCR 稳得多，但随包字模只覆盖极少棋子（平板 5 / 119），绝大多数卡只能靠 OCR
+     * 硬读，实测能正常决策的帧只有 21%。这里把 OCR 的成功结果反向攒成字模，边玩边补。
+     * 三重校验见 {@link TemplateCollector}。
+     */
+    private TemplateCollector collector;
+
     ShopOcr(Context context, ChampionCatalog catalog) {
         this.catalog = catalog;
         this.context = context;
         loadTemplates(PhoneLayout.current());
+        // 采集只在字模目录已标定的机型上开启：目录缺失时没有参照尺寸，攒出来的字模也没法用。
+        if (!noTemplates) {
+            collector = new TemplateCollector(context);
+            collector.setCatalog(catalog);
+            collector.setEnabled(true);
+        }
     }
     /**
      * 按版式加载字模。机型专用目录缺失时**不回退**到其它机型的字模：
@@ -328,26 +343,47 @@ final class ShopOcr implements AutoCloseable {
         if (f.gold > MAX_GOLD) { f.gold = -1; f.problem = "金币读数超出合理范围"; }
         f.readable = f.gold >= 0;
         if (!f.readable && f.problem.isEmpty()) f.problem = "金币区域读取失败";
+        // 本帧「靠 OCR 而不是靠模板」认出来的卡名，供自举采集使用。
+        // 只收 OCR 结果：模板命中的格子本来就有字模，重复采集没有意义。
+        String[] ocrNames = new String[5];
+        // 本帧「有字但名字读不出」的格子，供采集器按形状稳定性落盘（打破缺字模↔读不出的死循环）。
+        boolean[] unread = new boolean[5];
         for (int i = 0; i < 5; i++) {
             if (empty(pixels, image.getWidth(), name(i))) { f.names[i] = ""; continue; }
             String known = null;
             byte[] mask = signature[i];
             PhoneVision.Template sample = new PhoneVision.Template(mask, PhoneLayout.NAME_W, PhoneLayout.NAME_H);
             double best = .90;
+            // 同时记下「不管过不过门限」的最高分与对应卡名，读不出名字时写进诊断。
+            // 只用于日志：差 0.02 没到门限与「压根没有这张卡的字模」是完全不同的两件事，
+            // 前者调阈值或重新采集即可，后者必须补字模。没有这个数就只能瞎猜。
+            double top = 0; String topName = null; int ink = 0;
+            for (int b = 0; b < mask.length; b++) if (mask[b] != 0) ink++;
             if (!noTemplates) for (int j = 0; j < templates.length; j++) {
+                // 卡名字模来自参考截图；只有当前赛季目录里同名棋子存在时才采信。
+                if (!catalog.has(templateNames[j])) continue;
                 double score = PhoneVision.score(sample, templates[j]);
-                // 模板来自参考截图；只有当前赛季目录里同名棋子存在时才采信。
-                if (score >= best && catalog.has(templateNames[j])) { best = score; known = templateNames[j]; }
+                if (score > top) { top = score; topName = templateNames[j]; }
+                if (score >= best) { best = score; known = templateNames[j]; }
             }
+            f.nameScores[i] = top;
+            f.nameHints[i] = topName;
             Reading name = readings[i];
             if (recover && known == null && name.text.isEmpty()) name = read(image, name(i), false);
             // 模板命中时用模板卡名；否则把 OCR 结果按棋池校正一位错别字（「破比」→「波比」），
             // 否则目标匹配的精确比对会漏买。
             String text = name.text.isEmpty() ? null : catalog.normalize(name.text, targets);
             f.names[i] = known != null ? known : text;
+            // 只有「模板没命中、靠 OCR 读出」的格子才记进采集名单。
+            if (known == null && text != null) ocrNames[i] = text;
             if (known == null && name.text.isEmpty()) {
                 f.readable = false;
-                f.problem += (f.problem.isEmpty() ? "" : "；") + "第 " + (i + 1) + " 格暂未读到卡名";
+                unread[i] = true;
+                // 带上诊断：墨迹量（判「框里到底有没有字」）+ 最像的字模与分数。
+                // 墨迹很少说明卡名框裁到了空白/边框（版式问题）；
+                // 墨迹正常但最高分很低（<0.70）说明这张卡没有字模；接近 0.90 说明只差阈值。
+                f.problem += (f.problem.isEmpty() ? "" : "；") + "第 " + (i + 1) + " 格暂未读到卡名"
+                    + "[墨迹" + ink + (topName == null ? " 无匹配" : " 最近" + topName + " " + Math.round(top * 100) / 100.0 + "") + "]";
             }
             f.costs[i] = number(readings[i + 5]);
             byte[] feeMask = signature[i + 5];
@@ -366,6 +402,15 @@ final class ShopOcr implements AutoCloseable {
             }
         }
         if (f.readable) { previousFrame = f; previousSignature = signature; previousFrameAt = android.os.SystemClock.elapsedRealtime(); }
+        // 自举采集：把「这一帧靠 OCR 读出来、且名字在棋池里」的卡名掩码喂给采集器，
+        // 攒够三次确认就落盘成字模。**只喂 OCR 成功的那几格**——模板命中的格子本来就不缺字模。
+        if (collector != null) {
+            collector.observe(signature, ocrNames);
+            // 「有字但读不出」的格子按形状稳定性另存一份（unknown-*.bin），由人工认领。
+            // 这条路径是打破「缺字模 → 读不出 → 采不到」死循环的唯一出口：
+            // S16 的单字卡「烬」至今没有字模，六份日志里出现 0 次就是这个循环。
+            collector.observeUnread(signature, unread);
+        }
         return f;
     }
     private int number(Reading reading) {

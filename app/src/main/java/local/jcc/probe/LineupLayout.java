@@ -52,6 +52,29 @@ public final class LineupLayout {
         public final int previewRightMax, previewBottomMax, buttonHalfWidth;
         /** 头像取样框顶到预览底沿的距离（含装备条），小米 14 为 152。 */
         public final int previewRowHeight;
+        /**
+         * 补读第 10 张时的横向滑动量（负数 = 向左拖）。
+         *
+         * <p>**必须按机型给，不能写死**：卡片行的可视宽度只够排 9 格，第 10 张要滑出来才能读。
+         * 滑动量得覆盖「一格卡位」才够——平板上把「第 9 张左沿 + 卡位间距」算出来正好压在
+         * 视口右沿之外，只滑 105 像素（K80 的实测值）时第 10 张只露出约 21 像素的一条边，
+         * 175 的取样框根本放不进去，于是永远读不到第 10 张。
+         *
+         * <p>这里给「一格卡位」左右的量即可：滚动容器会自行夹到最大位移，多给的不会越界。
+         */
+        public final int heroSwipeDx;
+        /**
+         * 该机型能否「点总金币收起商店」。
+         *
+         * <p>只有手机版有这个交互：点金币面板会把商店收起来，从而让后续点击不被遮挡。
+         * **平板（OPPO Pad 4 Pro）没有这个交互** —— 实测助手连点金币 12 次、手动点也没有
+         * 任何反应，商店始终开着。若状态机在这里等「商店已收起」，流程会一直空转到超时，
+         * 表现为「从 app 导入打不开阵容收藏」。
+         *
+         * <p>注意：右上角「菜单/阵容」图标在屏幕最顶部、商店在底部，两者不重叠，
+         * 所以商店开着**不影响**点图标，平板上完全可以直接往下走。
+         */
+        public final boolean canCloseShop;
         /** 该机型的阵容入口图标描迹模板；不同机型图标形状不同，不能共用。 */
         public final String iconAsset;
 
@@ -60,11 +83,11 @@ public final class LineupLayout {
              int titleLeft, int titleRight, int buttonLeft, int buttonRight, int[] rowSignature, int rowPitch,
              int[] avatar, int avatarSlots, int avatarPitch, int avatarRight, int[] avatarProbe,
              int[] iconSearch, double iconThreshold, int previewRightMax, int previewBottomMax,
-             int buttonHalfWidth, int previewRowHeight) {
+             int buttonHalfWidth, int previewRowHeight, int heroSwipeDx) {
             this(label, width, height, headerArea, promptArea, importArea, closeDx, closeY, replaceArea,
                 titleBands, buttonBands, titleLeft, titleRight, buttonLeft, buttonRight, rowSignature, rowPitch,
                 avatar, avatarSlots, avatarPitch, avatarRight, avatarProbe, iconSearch, iconThreshold,
-                previewRightMax, previewBottomMax, buttonHalfWidth, previewRowHeight, ICON_ASSET);
+                previewRightMax, previewBottomMax, buttonHalfWidth, previewRowHeight, heroSwipeDx, true, ICON_ASSET);
         }
 
         Spec(String label, int width, int height, int[] headerArea, int[] promptArea, int[] importArea,
@@ -72,7 +95,19 @@ public final class LineupLayout {
              int titleLeft, int titleRight, int buttonLeft, int buttonRight, int[] rowSignature, int rowPitch,
              int[] avatar, int avatarSlots, int avatarPitch, int avatarRight, int[] avatarProbe,
              int[] iconSearch, double iconThreshold, int previewRightMax, int previewBottomMax,
-             int buttonHalfWidth, int previewRowHeight, String iconAsset) {
+             int buttonHalfWidth, int previewRowHeight, int heroSwipeDx, boolean canCloseShop) {
+            this(label, width, height, headerArea, promptArea, importArea, closeDx, closeY, replaceArea,
+                titleBands, buttonBands, titleLeft, titleRight, buttonLeft, buttonRight, rowSignature, rowPitch,
+                avatar, avatarSlots, avatarPitch, avatarRight, avatarProbe, iconSearch, iconThreshold,
+                previewRightMax, previewBottomMax, buttonHalfWidth, previewRowHeight, heroSwipeDx, canCloseShop, ICON_ASSET);
+        }
+
+        Spec(String label, int width, int height, int[] headerArea, int[] promptArea, int[] importArea,
+             int closeDx, int closeY, int[] replaceArea, int[][] titleBands, int[][] buttonBands,
+             int titleLeft, int titleRight, int buttonLeft, int buttonRight, int[] rowSignature, int rowPitch,
+             int[] avatar, int avatarSlots, int avatarPitch, int avatarRight, int[] avatarProbe,
+             int[] iconSearch, double iconThreshold, int previewRightMax, int previewBottomMax,
+             int buttonHalfWidth, int previewRowHeight, int heroSwipeDx, boolean canCloseShop, String iconAsset) {
             this.label = label; this.width = width; this.height = height;
             this.headerArea = headerArea; this.promptArea = promptArea; this.importArea = importArea;
             this.closeDx = closeDx; this.closeY = closeY; this.replaceArea = replaceArea;
@@ -87,6 +122,8 @@ public final class LineupLayout {
             this.previewRightMax = previewRightMax; this.previewBottomMax = previewBottomMax;
             this.buttonHalfWidth = buttonHalfWidth;
             this.previewRowHeight = previewRowHeight;
+            this.heroSwipeDx = heroSwipeDx;
+            this.canCloseShop = canCloseShop;
             this.iconAsset = iconAsset;
         }
         public int[] titleBand(int row) { return titleBands[row]; }
@@ -111,7 +148,9 @@ public final class LineupLayout {
         // 原实现的粗搜范围是「左上角 x480..620 / y290..390，步长 6」，这里记左上角取值范围。
         new int[]{480, 290, 620, 390},
         new int[]{2200, 25, 2340, 53, 64}, 55,
-        2035, 1110, 100, 152);
+        2035, 1110, 100, 152,
+        // 滑动量 105：卡位间距 154，滑一格多一点就能让第 10 张完整露出。
+        -105);
 
     /**
      * K80 至尊版：**全部数值由 2772×1280 原生截图重新实测**（v0.11.27）。
@@ -167,42 +206,78 @@ public final class LineupLayout {
         new int[]{436, 357, 116, 116}, 9, 164, 1905, new int[]{410, 342, 470, 380},
         new int[]{2280, 25, 2370, 70, 82}, 42,
         // 预览右沿收到「应用」按钮左侧（按钮左沿 2037 − 2），下沿给到第三行卡底 1152。
-        2040, 1155, 107, 147);
+        2040, 1155, 107, 147,
+        // 滑动量 110：卡位间距 164，实测滑 112px 时首卡从 533 变成 585，取 110。
+        -110);
 
     /**
-     * OPPO Pad 4 Pro：由 3392×2400 原生截图逐区域实测（连续三帧交叉核对，排除画面闪烁干扰）。
+     * OPPO Pad 4 Pro：由 3392×2400 原生截图逐区域实测（2026-11-17 用四张新截图重测）。
      *
      * <p>与小米 14 / K80 的结构差异：**平板棋盘右上只有「菜单」与「设置」两个圆形图标**，
      * 点菜单先进阵容详情页、再点「返回阵容选择」才到收藏列表页；没有手机上独立阵容图标。
+     * 右上「菜单」圆盘中心实测 (3130,105)。
      *
      * <p>实测（面板底板 x278..3113、y406..1993）：
-     * 「阵容」标题（x361..614）与三颗胶囊按钮同在 y466..529 一行：导入代码（文字 x1704..1979）、
-     * 游戏资料（≈2129..2406）、更多阵容（≈2554..2836）；
-     * 三行阵容标题文字带 y630..690 / 1118..1176 / 1596..1654（行间距 488、478，取 484）；
-     * 三行「应用」按钮中心 y826 / 1308 / 1786，棕底金框 x2730..3040。
+     * 「阵容」标题（x361..614）与三颗胶囊按钮同在 y466..529 一行：导入代码（文字 x1703..1979）、
+     * 游戏资料（x2127..2406）、更多阵容（x2554..2837）；关闭 X 中心 (3009,503)。
      * 卡位竖边框 x359/600/841/1083/1324/1565/1808…，**卡位间距 241**；
-     * 单卡纵向 y773..963（含装备条），头像立绘区 y773..943。
-     * 头像取样框 110×110、左沿 374、顶 790——实测 116 会把左边框与星标带进采样。
+     * 单卡金框 x359..549、y750..916（含装备条），行距 477。
+     *
+     * <p>**头像取样框必须 175×175**（本次修正的核心）：平板卡位间距 241 是 K80（164）的
+     * 1.47 倍，取样框要同比放大。旧的 110 只盖住卡片中间一条，12×12 描迹与目录头像的
+     * 尺度对不上，回归复算三行 27 张只有 2 张过门限；换 175 后 27/27 全中，且首选卡名
+     * 与截图逐一相符。左沿 370 / 顶 760 让 175 框居中落在立绘区内。
      *
      * <p>关闭 X 与「导入代码」是**两处最易点错的位置**，必须严格按实测值：
-     * 关闭 X 中心 x≈3008 / y≈504（标题左沿 361 → closeDx 2647）；「导入代码」胶囊文字
-     * x1704..1979（中心 ≈1841），而「游戏资料」在中心 ≈2333、「更多阵容」在 ≈2714——
-     * 三者挨得很近，`importArea` 一旦放宽就会点成游戏资料。
+     * 关闭 X 中心 x≈3009 / y≈503（列表页标题左沿 361 → closeDx 2647，落到 3008；
+     * 弹窗页「提示」左沿 377 → 3024，两者都落在 X 字形 2980..3038 内）；
+     * 「导入代码」胶囊文字 x1703..1979（中心 ≈1841），而「游戏资料」在中心 ≈2266、
+     * 「更多阵容」在 ≈2695——三者挨得很近，`importArea` 一旦放宽就会点成游戏资料。
      *
-     * <p>收藏上限替换界面已实测：面板 x278..3113、「提示」标题 y480..530、
-     * 三行「替换」按钮中心 y882 / 1335 / 1788（行间距 453、x2730..3040）。
+     * <p>**收藏上限弹窗与列表页不是同一套纵向网格**（本次修正的第二个 bug）：
+     * 弹窗「替换」文字中心 y819 / 1272 / 1725（行距 453），列表页「应用」中心 y847 / 1325 / 1803
+     * （行距 478）。旧 `replaceArea={2450,820,3120,1930}` 把三行「替换」全框了进去，
+     * 而 `find()` 取「面积最小的匹配」，三行文字同尺寸时经常选中第二行——这就是
+     * 「替换阵容时自动替换到第二个阵容」的直接原因。现在只框第三行 y1660..1790。
      */
     private static final Spec PAD4PRO = new Spec(
         "OPPO Pad 4 Pro", 3392, 2400,
         new int[]{280, 420, 900, 580}, new int[]{280, 460, 1900, 560}, new int[]{1690, 460, 2000, 555},
-        2647, 504, new int[]{2450, 820, 3120, 1930},
-        new int[][]{{610, 710}, {1098, 1196}, {1576, 1674}},
-        new int[][]{{760, 900}, {1238, 1378}, {1716, 1856}},
+        // 关闭 X 中心 (3009,503)，列表页标题左沿 361 → 2647；弹窗页「提示」左沿 377 → 3024。
+        // 两页的 X 字形都在 2980..3038 内，同一个偏移即可覆盖。
+        2647, 504,
+        // **只框第三行「替换」**：弹窗页三行「替换」文字中心实测 y=819 / 1272 / 1725，
+        // 行距 453。旧值 {2450,820,3120,1930} 把三行全包了进去，而 `find()` 取的是
+        // 「面积最小的匹配」——三行文字大小完全一致，于是常常命中第二行，表现为
+        // 「替换时自动替换到第二个阵容」。上沿必须 >1272 才能排除第二行，下沿留到 1790。
+        new int[]{2780, 1660, 3010, 1790},
+        // 标题带取列表页(y616..670 / 1094..1147 / 1571..1626)与弹窗页
+        // (y646..701 / 1099..1154 / 1552..1606)的并集，两页同名标题都只落在本行。
+        new int[][]{{600, 715}, {1080, 1165}, {1540, 1640}},
+        // 按钮带同理取并集：列表页「应用」y786..915 / 1263..1393 / 1742..1872，
+        // 弹窗页「替换」y757..887 / 1209..1339 / 1662..1792。并集后每行只含本行按钮。
+        new int[][]{{740, 925}, {1195, 1405}, {1645, 1885}},
         380, 2200, 2700, 3120,
-        new int[]{380, 790, 1600, 110}, 477,
-        new int[]{374, 790, 110, 110}, 9, 241, 2600, new int[]{364, 778, 400, 806},
+        // 行指纹取前 9 张卡的头部横带（370 → 370+8*241+175=2473）。
+        new int[]{370, 760, 2000, 175}, 477,
+        // 头像取样框 **175×175**：平板卡位间距 241 是 K80（164）的 1.47 倍，取样框必须
+        // 同比放大。旧的 110 只覆盖卡片中间一条，描迹与目录头像尺度对不上，实测三行
+        // 27 张只有 2 张过门限；换成 175 后 27/27 全中且首选全部正确。
+        // 左沿 370 / 顶 760：卡片金框实测 x359..549、y750..916，175 框居中落在立绘区内。
+        new int[]{370, 760, 175, 175}, 9, 241, 2600, new int[]{364, 778, 400, 806},
+        // 棋盘右上「菜单」圆盘中心 (3130,105)：模板 82 边长时棋盘态 RMS 11.5，
+        // 而阵容列表页会凑出 69.9、收藏上限弹窗 107.9，门限取 55 分离得很干净。
         new int[]{3000, 20, 3200, 180, 82}, 55,
-        2600, 1990, 150, 175, "templates-pad/lineup-button.bin");
+        2600, 1990, 150, 175,
+        // 滑动量 260：平板卡位间距 241，实测滑 105 像素时首卡只从 493 移到 415（仅 78px），
+        // 第 10 张只在 x2588..2609 露一条 21px 的边，175 的取样框放不进去、永远读不到。
+        // 取 260（略多于一个卡位）保证第 10 张完整露出；滚动容器会自行夹到最大位移。
+        -260,
+        // **平板没有「点金币收商店」这个交互**：实测助手连点 12 次、手动点同一位置都没有反应，
+        // 商店始终开着（那台机上确实没有这个操作）。商店在底部、右上角菜单在最顶部，
+        // 两者不重叠，直接点图标即可，所以平板上不在收商店上等待。
+        false,
+        "templates-pad/lineup-button.bin");
 
     private static final Spec[] SPECS = {XIAOMI14, K80, PAD4PRO};
 

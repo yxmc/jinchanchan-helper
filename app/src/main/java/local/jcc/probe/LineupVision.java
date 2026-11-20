@@ -131,10 +131,27 @@ final class LineupVision implements AutoCloseable {
         if(!forceThird&&out.favoriteRows<3 && titles[2]==null)for(int row=0;row<3;row++)if(titles[row]!=null){out.targetRow=row;break;}
         out.targetTitle=titles[out.targetRow];out.targetMatches=out.targetTitle!=null;out.targetApplied=applied[out.targetRow];
         if(!out.targetApplied)out.applyButton=center(buttons[out.targetRow]);
+        // 抬头与「导入代码」都认不到时，若三行里认出了「应用/取消/替换」，说明阵容面板确实开着。
+        // 实测面板与商店叠加时画面文字太多（130+ 条），OCR 会把「阵容」「导入代码」整块漏掉，
+        // 只剩按钮还能认出来。不补这一条，`menu` 判假 → 状态机以为在棋盘 → 反复点菜单/关面板，
+        // 用户看到的就是「手动打开阵容收藏也识别不出来」。
+        if(!out.menu&&!out.replacement) {
+            boolean anyButton=false;
+            for(Rect b:buttons)if(b!=null){anyButton=true;break;}
+            if(anyButton)out.menu=true;
+        }
         int[] screenPixels=new int[image.getWidth()*image.getHeight()];image.getPixels(screenPixels,0,image.getWidth(),0,0,image.getWidth(),image.getHeight());
         out.formationIcon=findIcon(screenPixels,image.getWidth(),spec);
         if(out.menu)out.rowSignature=PortraitMatcher.descriptor(screenPixels,image.getWidth(),spec.rowSignature(out.targetRow)[0],spec.rowSignature(out.targetRow)[1],spec.rowSignature(out.targetRow)[2],spec.rowSignature(out.targetRow)[3]);
-        out.board=(out.has("购买经验",image.getWidth(),image.getHeight())||out.formationIcon!=null)&&!out.has("请选择一个强化符文",image.getWidth(),image.getHeight())&&!out.has("对局结束",image.getWidth(),image.getHeight())&&!out.has("选择强化符文",image.getWidth(),image.getHeight())&&!out.has("再来一局",image.getWidth(),image.getHeight())&&!out.has("返回大厅",image.getWidth(),image.getHeight())&&!out.has("退出对局",image.getWidth(),image.getHeight());
+        // **阵容面板开着时必须判为「不在棋盘」**：面板是浮在棋盘上方的半透明浮层，底下的
+        // 「购买经验」按钮与右上角菜单图标依然可见、依然能被 OCR/模板读到，所以
+        // `has("购买经验") || formationIcon != null` 在面板开着时同样成立。
+        // 不排除这一段，`board` 会与 `menu` 同时为真，状态机 PREPARE 先判 board 就会
+        // 反复去点「打开菜单」或「关闭面板」——实测日志里满是
+        // `menu=false ... board=true` 后紧跟「确认应用并关闭面板」，用户看到的就是
+        // 「一直卡在游戏主界面」「手动打开阵容收藏也识别不出来」。
+        boolean lineupVisible=out.menu||out.replacement;
+        out.board=!lineupVisible&&(out.has("购买经验",image.getWidth(),image.getHeight())||out.formationIcon!=null)&&!out.has("请选择一个强化符文",image.getWidth(),image.getHeight())&&!out.has("对局结束",image.getWidth(),image.getHeight())&&!out.has("选择强化符文",image.getWidth(),image.getHeight())&&!out.has("再来一局",image.getWidth(),image.getHeight())&&!out.has("返回大厅",image.getWidth(),image.getHeight())&&!out.has("退出对局",image.getWidth(),image.getHeight());
         if(out.menu&&out.targetMatches&&wantPortraits) {
             out.heroes=PortraitMatcher.readRow(screenPixels,image.getWidth(),spec,out.targetRow,portraits);
             if(out.heroes.moreRight) {

@@ -302,6 +302,9 @@ public class CaptureService extends AccessibilityService {
         if (!deck.isCode()) { status("此阵容没有阵容码"); return; }
         // 双保险：即使调用方漏判，也不允许在未标定机型上启动导入。
         if (!lineupSupported()) { status("此设备暂不支持阵容导入，请手动填写英雄名"); return; }
+        // 起步就把悬浮窗停到不影响游戏 UI 的位置：平板右上角是「菜单」图标，导入第一步就要点它，
+        // 悬浮球压在那里会让 tapForLineup 的 blocksPoint 命中并直接放弃本次点击。
+        if (overlay != null) overlay.dockBelowShop();
         lineupImporter = new LineupImporter(this,deck);lineupImporter.begin();
     }
     private void cancelLineup() { if (lineupImporter != null) { lineupImporter.cancel();lineupImporter=null; } }
@@ -445,24 +448,42 @@ public class CaptureService extends AccessibilityService {
             " scanning=" + scanning + " panel=" + choosingDeck + " importing=" + isImporting());
     }
     private static boolean isGamePackage(String pkg) { return pkg.equals("com.tencent.jkchess") || pkg.equals("com.tencent.jk"); }
+    /**
+     * 游戏是否在前台。
+     *
+     * <p>**必须遍历完全部窗口再下结论**，不能在第一个 application 窗口处就 `return`。
+     * 原实现是「找到第一个 active/focused 的 application 窗口，返回它是不是游戏」，
+     * 而用户点「导入」的那一瞬间助手自己仍在前台（面板 + 悬浮窗还在），`getWindows()`
+     * 里助手的窗口往往排在游戏前面，于是 `foreground` 被记成 `local.jcc.probe`、
+     * 判定恒为 false —— 导入流程永远停在「待命：请收起面板并保持游戏前台」，
+     * 一次都不会去点右上角菜单。这正是平板上「点了导入根本打不开阵容收藏」的根因。
+     *
+     * <p>正确判据：只要**任意**一个 application 窗口属于游戏，就算游戏在前台。
+     * 助手悬浮窗与游戏同时可见是常态，两者不该互相否决。
+     */
     private boolean isGameForeground() {
         try {
+            boolean sawAny=false;
             for (android.view.accessibility.AccessibilityWindowInfo window : getWindows()) {
-                if (window.getType() != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION ||
-                    !(window.isActive() || window.isFocused())) continue;
+                if (window.getType() != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) continue;
                 android.view.accessibility.AccessibilityNodeInfo root = window.getRoot();
                 if (root == null) continue;
                 try {
-                    if (root.getPackageName() != null) {
-                        foreground = root.getPackageName().toString();
-                        return isGamePackage(foreground);
-                    }
+                    CharSequence pkg = root.getPackageName();
+                    if (pkg == null) continue;
+                    sawAny=true;
+                    if (isGamePackage(pkg.toString())) { foreground = pkg.toString(); return true; }
                 } finally { root.recycle(); }
             }
+            // 窗口列表里没找到游戏时，退回「活动窗口」再确认一次：部分机型 getWindows() 返回不全。
             android.view.accessibility.AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root != null) try {
-                if (root.getPackageName() != null) { foreground = root.getPackageName().toString(); return isGamePackage(foreground); }
+                if (root.getPackageName() != null) {
+                    foreground = root.getPackageName().toString();
+                    if (isGamePackage(foreground)) return true;
+                }
             } finally { root.recycle(); }
+            if (!sawAny) foreground = "?";
         } catch (RuntimeException e) { android.util.Log.w("JccAssist", "读取前台窗口失败", e); }
         // Never authorize a gesture solely from an old event's package name.
         return false;

@@ -13,6 +13,15 @@ public final class BuyPolicy {
         public int width, height;
         public final String[] names = new String[5];
         public final int[] costs = new int[5];
+        /**
+         * 每格卡名「最像的那张字模」及其相似度，仅用于诊断。
+         *
+         * <p>读不出卡名时只记一句「第 N 格暂未读到卡名」，事后无法区分两种情况：
+         * 相似度差一点点没到 0.90 门限（调阈值就能救），还是根本没有对应字模（必须补字模）。
+         * 把最高分与对应卡名带出来，日志里直接可判。未命中时为 null / 0。
+         */
+        public final String[] nameHints = new String[5];
+        public final double[] nameScores = new double[5];
         public String problem = "";
         public String summary() { return Arrays.toString(names) + " · 金币 " + gold; }
     }

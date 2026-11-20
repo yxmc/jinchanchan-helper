@@ -5,6 +5,13 @@ final class LineupFlow {
     enum Stage { PREPARE, WAIT_BOARD, WAIT_CLOSED, WAIT_MENU, WAIT_IMPORTED, WAIT_APPLY, WAIT_CLOSED_FINAL, DONE }
     static final class View {
         boolean shop,board,menu,replacement,targetMatches,applied,full;
+        /**
+         * 本机型能否「点总金币收起商店」。手机可以，平板不行。
+         *
+         * <p>为假时状态机**不再等商店收起**，直接点右上角菜单继续。商店在屏幕底部、
+         * 菜单图标在最顶部，两者不重叠，所以这是安全的。
+         */
+        boolean canCloseShop=true;
     }
     private Stage stage=Stage.PREPARE;
     private int replacementReads, importedReads, verifiedReads;
@@ -44,13 +51,23 @@ final class LineupFlow {
         switch(stage) {
             case PREPARE:
                 if(view.menu||view.replacement){stage=Stage.WAIT_BOARD;return Action.CLOSE_EXISTING;}
-                if(view.shop){stage=Stage.WAIT_CLOSED;return Action.CLOSE_SHOP;}
+                // **商店开着不是拦路条件**：右上角「菜单/阵容」图标在屏幕最顶部，商店在底部，
+                // 两者根本不重叠，直接点图标即可。
+                // 手机保留「先点金币收商店」的老行为（有该交互，收起后画面更干净）；
+                // **平板没有这个交互**（实测助手连点 12 次、手动点同一位置都没反应），
+                // 所以在 `canCloseShop=false` 时跳过收商店，否则会死在 `WAIT_CLOSED` 直到超时——
+                // 用户看到的就是「从 app 点导入打不开阵容收藏」。
+                if(view.shop&&view.canCloseShop){stage=Stage.WAIT_CLOSED;return Action.CLOSE_SHOP;}
                 if(view.board){stage=Stage.WAIT_MENU;return Action.OPEN_MENU;}
                 return Action.WAIT;
             case WAIT_BOARD:
                 if(!view.menu&&!view.replacement){stage=Stage.PREPARE;return next(view);}return Action.WAIT;
             case WAIT_CLOSED:
-                if(!view.shop&&view.board){stage=Stage.WAIT_MENU;return Action.OPEN_MENU;}return Action.WAIT;
+                // 收商店阶段：只在手机上会进来（平板在 PREPARE 就跳过了）。
+                // 商店还开着就继续重发点击——商店弹出有动画，落在动画帧上的点击会被吞掉；
+                // 金币面板没有交互，重发无副作用，比干等到超时安全。
+                if(!view.shop&&view.board){stage=Stage.WAIT_MENU;return Action.OPEN_MENU;}
+                return view.shop&&view.canCloseShop?Action.CLOSE_SHOP:Action.WAIT;
             case WAIT_MENU:
                 if(view.menu){requiresReplacement=view.full;stage=Stage.WAIT_IMPORTED;return Action.IMPORT;}return Action.WAIT;
             case WAIT_IMPORTED:
@@ -81,8 +98,10 @@ final class LineupFlow {
                 // applied=true，面板明明已经应用好了却空等 15 秒才超时。
                 // 「已应用」是比标题更强的证据——它只能出现在目标行上。
                 if(view.menu&&view.applied&&(view.targetMatches||rowConfirmed)){appliedConfirmed=true;return Action.CLOSE_EXISTING;}
-                if(appliedConfirmed&&view.shop&&!finalShopClosing){finalShopClosing=true;return Action.CLOSE_SHOP;}
-                if(appliedConfirmed&&!view.menu&&!view.replacement&&!view.shop&&view.board){stage=Stage.DONE;return Action.FINISH;}
+                // 收尾同样按机型：手机先把商店收起来（画面干净），平板收不起就不等它 ——
+                // 否则会在已经成功应用之后空转到超时，把成功的导入报成失败。
+                if(appliedConfirmed&&view.shop&&view.canCloseShop&&!finalShopClosing){finalShopClosing=true;return Action.CLOSE_SHOP;}
+                if(appliedConfirmed&&!view.menu&&!view.replacement&&(!view.shop||!view.canCloseShop)&&view.board){stage=Stage.DONE;return Action.FINISH;}
                 return Action.WAIT;
             default:return Action.WAIT;
         }

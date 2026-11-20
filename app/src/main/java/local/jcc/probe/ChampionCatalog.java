@@ -78,10 +78,27 @@ final class ChampionCatalog {
      * 凯南/凯隐；三字如 约里克/沃里克/塔里克、雷克塞/雷克顿、金克丝/拉克丝），
      * 向全池归一化会把一张卡认成另一张，那就买错卡了。目标通常只有十来个名字，
      * 组内几乎不会互为错字，向它收敛既安全又能补回漏买。
+     *
+     * <p>**但「组内不互为错字」这条假设不成立**：目标里有「金克丝」时，OCR 正确读出的
+     * 「拉克丝」只差一个字，会被改写成「金克丝」并当成目标买掉；目标里有「沃里克」时
+     * 「约里克」「塔里克」同理；目标里有单字的「蔚」时，任何单字卡名（洛/霞/慎/易/烬/彗）
+     * 都会被改写成「蔚」。真正的 OCR 错字有个干净的共性——**错字本身不在棋池里**
+     * （「料加斯」「破比」「德菜文」都不是合法卡名），而「拉克丝」「塔里克」都是。
+     * 所以这里先判「原名是否已是棋池真名」：是就不收敛，直接原样返回。
      */
     String normalize(String raw, java.util.Collection<String> targets) {
+        return normalize(raw, targets, names);
+    }
+    /**
+     * {@link #normalize(String, java.util.Collection)} 的实现，棋池单独传入以便离线回归。
+     *
+     * @param pool 当前赛季的全部合法卡名
+     */
+    static String normalize(String raw, java.util.Collection<String> targets, java.util.Collection<String> pool) {
         if (raw == null || raw.isEmpty()) return raw;
         if (targets.contains(raw)) return raw;
+        // OCR 读到的本来就是一张合法存在的卡 —— 那不是错字，是另一张卡，绝不能再改写。
+        if (pool.contains(raw)) return raw;
         for (String candidate : targets) {
             // 长度差超过 1 的不可能是同一个卡名，先剪掉大部分候选。
             if (Math.abs(candidate.length() - raw.length()) > 1) continue;

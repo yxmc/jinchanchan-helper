@@ -58,8 +58,20 @@ final class LineupImporter {
      * <p>滑完首卡位置纹丝未动 = 这一行不可滚动 = 本来就没有第 10 张。
      */
     private int heroSwipeAnchorX=-1;
-    /** 滑动量。实测手动滑一次 112px 就够让第 10 张完整露出，取 105 留余量。 */
-    private static final int HERO_SWIPE_DX=-105;
+    /**
+     * 本帧所用版式的滑动量。**不要写死**：滑动量必须覆盖一个卡位间距才够把第 10 张滑出来，
+     * 而三个机型的卡位间距差很多（154 / 164 / 241）。平板曾沿用手机的 -105，实测首卡只从
+     * 493 移到 415（78px），第 10 张只在 x2588..2609 露一条 21px 的边，175 取样框放不进去，
+     * 于是「第三排有 10 个棋子」时第 10 个永远读不到。取值见 {@link LineupLayout.Spec#heroSwipeDx}。
+     */
+    private int heroSwipeDx=-105;
+    /**
+     * 本机型能否「点总金币收起商店」。手机 true、平板 false。
+     *
+     * <p>平板上该交互不存在（实测连点 12 次、手动点也无反应），若状态机等商店收起会一直
+     * 空转到超时。取值见 {@link LineupLayout.Spec#canCloseShop}。
+     */
+    private boolean canCloseShop=true;
     /** begin() 里那次剪贴板回读是否一致；IMPORT 分支据此决定要不要提示用户。 */
     private boolean clipboardOk;
     private final Runnable tick=this::tick;
@@ -121,6 +133,11 @@ final class LineupImporter {
                 LineupVision.Screen s=new LineupVision.Screen();s.layoutValid=false;return s;
             }
             unsupportedFrames=0;
+            // 滑动量按机型取：三个机型卡位间距差很多（154/164/241），写死一份必然在某个机型上
+            // 滑不够一格，第 10 张就永远露不出来。
+            heroSwipeDx=spec.heroSwipeDx;
+            // 机型能力：平板没有「点金币收商店」这个交互，不能在收商店上等待。
+            canCloseShop=spec.canCloseShop;
             if(vision==null)vision=new LineupVision(service,ChampionCatalog.of(service,service.championSet()));
             // 头像识别仍然需要（拿卡靠它），只是不再顺带裁预览图。原来这个开关叫 needsPreview，
             // 现在它实际控制的是「要不要读这一行的英雄头像」，保持为真即可。
@@ -153,6 +170,8 @@ final class LineupImporter {
             // 预览截图已取消，不再因「收藏成功」提示遮挡而等待。
             if(screen.favoriteRows>=3||screen.replacement)requireThirdRow=true;
             LineupFlow.View state=new LineupFlow.View();state.board=screen.board;state.shop=screen.shopOpen;state.menu=screen.menu;
+            // 机型能力：平板没有「点金币收商店」的交互，状态机据此不再等商店收起。
+            state.canCloseShop=canCloseShop;
             state.full=requireThirdRow||screen.favoriteRows>=3;state.replacement=screen.replacement;state.targetMatches=screen.targetMatches;state.applied=screen.targetApplied;
             // Only after this exact row was verified and Apply was dispatched may a
             // transient title OCR failure be confirmed by the unchanged portrait.
@@ -190,7 +209,7 @@ final class LineupImporter {
                 recycle(screen);
                 service.importStatus("阵容导入：读满 "+screen.heroes.count+" 格，滑动一次确认是否还有第 10 张");
                 // 等久一点再读：实测成功的滑动是 1.8 秒后才读到新位置，1.4 秒时画面还是旧的。
-                if(!service.swipeForLineup(from,HERO_SWIPE_DX,this,()->{inFlight=false;schedule(900);}))
+                if(!service.swipeForLineup(from,heroSwipeDx,this,()->{inFlight=false;schedule(900);}))
                     {inFlight=false;fail("当前界面或动作状态已变化，请重试导入");}
                 return;
             }
